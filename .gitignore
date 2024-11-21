@@ -1,0 +1,6 @@
+/data/
+*.pcd
+/out/
+__pycache__/
+/wandb/
+/*.sh

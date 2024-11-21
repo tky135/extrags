@@ -3,7 +3,7 @@ import os
 import torch
 import numpy as np
 from typing import Dict
-import pytorch3d as p3d
+
 from scipy.spatial.transform import Slerp
 from scipy.spatial.transform import Rotation as R
 
@@ -65,80 +65,348 @@ def get_interp_novel_trajectories(
     original_frames = per_cam_poses[list(per_cam_poses.keys())[0]].shape[0]
     
     trajectory_generators = {
-        "keep_rotating": keep_rotating,
-        "same": same,
         "front_center_interp": front_center_interp,
         "s_curve": s_curve,
         "three_key_poses": three_key_poses_trajectory,
-        "x_shift_left": x_shift_left,
-        "y_shift_left": y_shift_left
+        "x_shift_left": x_shift_left, 
+
+        "y_shift_left_ff": y_shift_left_ff,
+        "y_shift_left": y_shift_left, 
+        "y_shift_left_fl": y_shift_left_fl,
+        "y_shift_left_fr": y_shift_left_fr,
+        "y_shift_left_rl": y_shift_left_rl,
+        "y_shift_left_rr": y_shift_left_rr,
+        "y_shift_left_rm": y_shift_left_rm,
+        
+        "y_shift_right_ff": y_shift_right_ff,
+        "y_shift_right": y_shift_right,
+        "y_shift_right_fl": y_shift_right_fl,
+        "y_shift_right_fr": y_shift_right_fr,
+        "y_shift_right_rl": y_shift_right_rl,
+        "y_shift_right_rr": y_shift_right_rr,
+        "y_shift_right_rm": y_shift_right_rm,
     }
     
     if traj_type not in trajectory_generators:
         raise ValueError(f"Unknown trajectory type: {traj_type}")
     
     return trajectory_generators[traj_type](dataset_type, per_cam_poses, original_frames, target_frames)
+def y_shift_right_ff(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[0]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] += 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+def y_shift_right(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[1]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] += 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+def y_shift_right_fl(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[2]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] += 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+
+def y_shift_right_fr(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[3]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] += 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+def y_shift_right_rl(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[4]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] += 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+def y_shift_right_rr(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[5]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] += 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+def y_shift_right_rm(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[6]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] += 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+
+def y_shift_left_ff(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[0]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] -= 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+
 def y_shift_left(
     dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
 ) -> torch.Tensor:
-    assert 0 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
-    same_poses = interpolate_poses(per_cam_poses[0], target_frames)
-    same_poses[:, 1, 3] -= 3
-    return same_poses
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[1]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] -= 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+
+def y_shift_left_fl(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[2]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] -= 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+
+def y_shift_left_fr(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[3]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] -= 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+def y_shift_left_rl(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[4]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] -= 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+
+def y_shift_left_rr(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[5]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] -= 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
+
+def y_shift_left_rm(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[6]
+    modified_poses = same_poses.clone()
+    modified_poses[:, 1, 3] -= 3
+    
+    before = len(same_poses)//16
+    after = len(same_poses)//4
+    changing = len(same_poses) - before - after
+    
+    before_frac = np.zeros(before)
+    after_frac = np.ones(after)
+    changing_frac = (np.arange(changing)/changing)
+    
+    frac = np.concatenate([before_frac, changing_frac, after_frac])
+    frac = torch.from_numpy(frac).to(same_poses.device).float()
+    final_poses = same_poses * (1 - frac[:, None, None]) + modified_poses * frac[:, None, None]
+    return final_poses
 
 def x_shift_left(
     dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
 ) -> torch.Tensor:
-    assert 0 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
-    same_poses = interpolate_poses(per_cam_poses[0], target_frames)
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = interpolate_poses(per_cam_poses[1], target_frames)
     same_poses[:, 0, 3] -= 3
     return same_poses
 
-
-def same(
-    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
-) -> torch.Tensor:
-    """Generate a trajectory with the same poses as the original."""
-    assert 0 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
-    return interpolate_poses(per_cam_poses[0], target_frames)
-def keep_rotating(
-    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
-) -> torch.Tensor:
-    assert 0 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
-    import ipdb; ipdb.set_trace()
-    rotation_angles = torch.arange(0, 4 * torch.pi, 4 * torch.pi / target_frames)
-    rotation_angles = torch.hstack(torch.zeros_like(rotation_angles), torch.zeros_like(rotation_angles), rotation_angles)
-    rotation_matrices = p3d.transforms.euler_angles_to_matrix(rotation_angles, "XYZ")
-    rotation_matrices_4x4 = torch.eye(4, device=rotation_matrices.device)
-    rotation_matrices_4x4[:3, :3] = rotation_matrices
-    
-    
-    same_poses = interpolate_poses(per_cam_poses[0], target_frames)
-
-    return torch.matmul(same_poses, rotation_matrices_4x4)
-
-
-    
 
 def front_center_interp(
     dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int, num_loops: int = 1
 ) -> torch.Tensor:
     """Interpolate key frames from the front center camera."""
-    assert 0 in per_cam_poses.keys(), "Front center camera (ID 0) is required for front_center_interp"
-    key_poses = per_cam_poses[0][::original_frames//4]  # Select every 4th frame as key frame
+    assert 1 in per_cam_poses.keys(), "Front center camera (ID 0) is required for front_center_interp"
+    key_poses = per_cam_poses[1][::original_frames//4]  # Select every 4th frame as key frame
     return interpolate_poses(key_poses, target_frames)
 
 def s_curve(
     dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
 ) -> torch.Tensor:
     """Create an S-shaped trajectory using the front three cameras."""
-    assert all(cam in per_cam_poses.keys() for cam in [0, 1, 2]), "Front three cameras (IDs 0, 1, 2) are required for s_curve"
+    assert all(cam in per_cam_poses.keys() for cam in [1, 2, 3]), "Front three cameras (IDs 0, 1, 2) are required for s_curve"
     key_poses = torch.cat([
-        per_cam_poses[0][0:1],
-        per_cam_poses[1][original_frames//4:original_frames//4+1],
-        per_cam_poses[0][original_frames//2:original_frames//2+1],
-        per_cam_poses[2][3*original_frames//4:3*original_frames//4+1],
-        per_cam_poses[0][-1:]
+        per_cam_poses[1][0:1],
+        per_cam_poses[2][original_frames//4:original_frames//4+1],
+        per_cam_poses[1][original_frames//2:original_frames//2+1],
+        per_cam_poses[3][3*original_frames//4:3*original_frames//4+1],
+        per_cam_poses[1][-1:]
     ], dim=0)
     return interpolate_poses(key_poses, target_frames)
 

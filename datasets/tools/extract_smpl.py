@@ -94,7 +94,7 @@ class HMR2023TextureSampler(HMR2Predictor):
             face_verts = verts[:, face_vids, :] # B,N,3,3
 
             bs = face_verts.shape
-            map_verts = torch.einsum('bnij,ni->bnj', face_verts.float(), bmap_flat.float()) # B,N,3
+            map_verts = torch.einsum('bnij,ni->bnj', face_verts, bmap_flat) # B,N,3
 
             return map_verts, valid_mask
 

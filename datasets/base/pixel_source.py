@@ -5,6 +5,7 @@ import abc
 import cv2
 import random
 import logging
+import json
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
@@ -105,6 +106,8 @@ class CameraData(object):
         load_dynamic_mask: bool = False,
         # whether to load the sky masks
         load_sky_mask: bool = False,
+        # whether to load the road masks
+        load_road_mask: bool = False,
         # the size to load the images
         downscale_when_loading: float = 1.0,
         # whether to undistort the images
@@ -122,9 +125,23 @@ class CameraData(object):
         self.undistort = undistort
         self.buffer_downscale = buffer_downscale
         self.device = device
-        
         self.cam_name = DATASETS_CONFIG[dataset_name][cam_id]["camera_name"]
-        self.original_size = DATASETS_CONFIG[dataset_name][cam_id]["original_size"]
+
+        # get current cam timestamp
+        with open(os.path.join(self.data_path, self.cam_name, "keyframes", "all_key_frame.json"), 'r') as f:
+            frame_info = json.load(f)
+        self.timestamp_list = []
+        for idx, finfo in enumerate(frame_info):
+            if idx < self.start_timestep:
+                continue
+            if idx >= self.end_timestep:
+                break
+            self.timestamp_list.append(finfo['file_name'])
+        self.timestamp_list = sorted(self.timestamp_list)
+        
+        with open(os.path.join(self.data_path, self.cam_name, "calibration.json"), "r") as f:
+            calib_info = json.load(f)
+        self.original_size = (calib_info["image_height"], calib_info["image_width"])
         self.load_size = [
             int(self.original_size[0] / downscale_when_loading),
             int(self.original_size[1] / downscale_when_loading),
@@ -139,6 +156,8 @@ class CameraData(object):
             self.load_dynamic_masks()
         if load_sky_mask:
             self.load_sky_masks()
+        if load_road_mask:
+            self.load_road_masks()
         self.lidar_depth_maps = None # will be loaded by: self.load_depth()
         self.image_error_maps = None # will be built by: self.build_image_error_buffer()
         self.to(self.device)
@@ -193,7 +212,7 @@ class CameraData(object):
         # ---- define filepaths ---- #
         img_filepaths = []
         dynamic_mask_filepaths, sky_mask_filepaths = [], []
-        human_mask_filepaths, vehicle_mask_filepaths, road_mask_filepaths = [], [], []
+        human_mask_filepaths, vehicle_mask_filepaths = [], []
         
         fine_mask_path = os.path.join(self.data_path, "fine_dynamic_masks")
         if os.path.exists(fine_mask_path):
@@ -205,8 +224,6 @@ class CameraData(object):
 
         # Note: we assume all the files in waymo dataset are synchronized
         for t in range(self.start_timestep, self.end_timestep):
-            if hasattr(self, "frame_ids"):
-                t = self.frame_ids[t]
             img_filepaths.append(
                 os.path.join(self.data_path, "images", f"{t:03d}_{self.cam_id}.jpg")
             )
@@ -225,11 +242,6 @@ class CameraData(object):
                     self.data_path, dynamic_mask_dir, "vehicle", f"{t:03d}_{self.cam_id}.png"
                 )
             )
-            road_mask_filepaths.append(
-                os.path.join(
-                    self.data_path, dynamic_mask_dir, "road", f"{t:03d}_{self.cam_id}.png"
-                )
-            )
             sky_mask_filepaths.append(
                 os.path.join(self.data_path, "sky_masks", f"{t:03d}_{self.cam_id}.png")
             )
@@ -237,7 +249,6 @@ class CameraData(object):
         self.dynamic_mask_filepaths = np.array(dynamic_mask_filepaths)
         self.human_mask_filepaths = np.array(human_mask_filepaths)
         self.vehicle_mask_filepaths = np.array(vehicle_mask_filepaths)
-        self.road_mask_filepaths = np.array(road_mask_filepaths)
         self.sky_mask_filepaths = np.array(sky_mask_filepaths)
         
     def load_images(self):
@@ -358,29 +369,6 @@ class CameraData(object):
             vehicle_masks.append(np.array(vehicle_mask) > 0)
         self.vehicle_masks = torch.from_numpy(np.stack(vehicle_masks, axis=0)).float()
         
-        road_masks = []
-        for ix, fname in tqdm(
-            enumerate(self.road_mask_filepaths),
-            desc="Loading road masks",
-            dynamic_ncols=True,
-            total=len(self.road_mask_filepaths),
-        ):
-            road_mask = Image.open(fname).convert("L")
-            # resize them to the load_size
-            road_mask = road_mask.resize(
-                (self.load_size[1], self.load_size[0]), Image.BILINEAR
-            )
-            if self.undistort:
-                if ix == 0:
-                    print("undistorting road mask")
-                road_mask = cv2.undistort(
-                    np.array(road_mask),
-                    self.intrinsics[ix].numpy(),
-                    self.distortions[ix].numpy(),
-                )
-            road_masks.append(np.array(road_mask) > 0)
-        self.road_masks = torch.from_numpy(np.stack(road_masks, axis=0)).float()
-        
     def load_sky_masks(self):
         sky_masks = []
         for ix, fname in tqdm(
@@ -404,7 +392,31 @@ class CameraData(object):
                 )
             sky_masks.append(np.array(sky_mask) > 0)
         self.sky_masks = torch.from_numpy(np.stack(sky_masks, axis=0)).float()
-        
+    
+    def load_road_masks(self):
+        road_masks = []
+        for ix, fname in tqdm(
+            enumerate(self.road_mask_filepaths),
+            desc="Loading road masks",
+            dynamic_ncols=True,
+            total=len(self.road_mask_filepaths),
+        ):
+            road_mask = Image.open(fname).convert("L")
+            # resize them to the load_size
+            road_mask = road_mask.resize(
+                (self.load_size[1], self.load_size[0]), Image.BILINEAR
+            )
+            if self.undistort:
+                if ix == 0:
+                    print("undistorting road mask")
+                road_mask = cv2.undistort(
+                    np.array(road_mask),
+                    self.intrinsics[ix].numpy(),
+                    self.distortions[ix].numpy(),
+                )
+            road_masks.append(np.array(road_mask) > 0)
+        self.road_masks = torch.from_numpy(np.stack(road_masks, axis=0)).float()
+
     def load_depth(
         self,
         lidar_depth_maps: Tensor,
@@ -1112,7 +1124,7 @@ class ScenePixelSource(abc.ABC):
         """
         return self.data_cfg.sampler.buffer_downscale
     
-    def prepare_novel_view_render_data(self, dataset_type: str, traj: torch.Tensor) -> list:
+    def prepare_novel_view_render_data(self, dataset_type: str, cam_id:int, traj: torch.Tensor) -> list:
         """
         Prepare all necessary elements for novel view rendering.
 
@@ -1125,10 +1137,10 @@ class ScenePixelSource(abc.ABC):
                 - cam_infos: Camera information (extrinsics, intrinsics, image dimensions)
                 - image_infos: Image-related information (indices, normalized time, viewdirs, etc.)
         """
-        if dataset_type == "argoverse":
-            cam_id = 1  # Use cam_id 1 for Argoverse dataset
-        else:
-            cam_id = 0  # Use cam_id 0 for other datasets
+        # if dataset_type == "argoverse":
+        #     cam_id = 1  # Use cam_id 1 for Argoverse dataset
+        # else:
+        #     cam_id = 0  # Use cam_id 0 for other datasets
         
         intrinsics = self.camera_data[cam_id].intrinsics[0]  # Assume intrinsics are constant across frames
         H, W = self.camera_data[cam_id].HEIGHT, self.camera_data[cam_id].WIDTH
@@ -1155,6 +1167,7 @@ class ScenePixelSource(abc.ABC):
                 "intrinsics": intrinsics,
                 "height": torch.tensor([H], dtype=torch.long, device=self.device),
                 "width": torch.tensor([W], dtype=torch.long, device=self.device),
+                "cam_id": torch.full((H, W), cam_id, dtype=torch.long, device=self.device),
             }
             
             image_infos = {

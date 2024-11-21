@@ -244,16 +244,6 @@ if __name__ == "__main__":
             process_id_list=scene_ids_list,
             workers=args.workers,
         )
-    elif args.dataset == "kitti360":
-        from datasets.kitti360.kitti360_preprocess import Kitti360Processor
-        dataset_processor = Kitti360Processor(
-            load_dir=args.data_root,
-            save_dir=args.target_dir,
-            prefix=args.split,
-            process_keys=args.process_keys,
-            process_id_list=scene_ids_list,
-            workers=args.workers,
-        )
     else:
         raise ValueError(f"Unknown dataset {args.dataset}, please choose from waymo, pandaset, argoverse, nuscenes, kitti, nuplan")
 

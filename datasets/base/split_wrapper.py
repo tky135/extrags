@@ -27,7 +27,7 @@ class SplitWrapper(torch.utils.data.Dataset):
         return image_infos, cam_infos
 
     def next(self, camera_downscale) -> Tuple[dict, dict]:
-        # assert self.split == "train", "Only train split supports next()"
+        assert self.split == "train", "Only train split supports next()"
         
         img_idx = self.datasource.propose_training_image(
             candidate_indices=self.split_indices

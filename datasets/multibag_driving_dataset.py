@@ -2,6 +2,8 @@ from typing import Dict, Union, Literal
 import logging
 import os
 import cv2
+import json
+import glob
 import numpy as np
 from tqdm import trange, tqdm
 from omegaconf import OmegaConf
@@ -14,6 +16,7 @@ from datasets.base.scene_dataset import ModelType
 from datasets.base.scene_dataset import SceneDataset
 from datasets.base.split_wrapper import SplitWrapper
 from utils.visualization import get_layout
+from time import time
 from utils.geometry import transform_points
 from utils.camera import get_interp_novel_trajectories
 from utils.misc import export_points_to_ply, import_str
@@ -32,11 +35,10 @@ NAME_TO_NODE = {
     "DeformableNodes": ModelType.DeformableNodes
 }
 
-class DrivingDataset(SceneDataset):
+class MultiBagDrivingDataset(SceneDataset):
     def __init__(
         self,
         data_cfg: OmegaConf,
-        training: bool = True,
     ) -> None:
         super().__init__(data_cfg)
         
@@ -61,22 +63,24 @@ class DrivingDataset(SceneDataset):
         #     self.data_path = os.path.join(self.data_cfg.scene_idx)
             
         assert os.path.exists(self.data_path), f"{self.data_path} does not exist"
-        if os.path.exists(os.path.join(self.data_path, "ego_pose")):
-            total_frames = len(os.listdir(os.path.join(self.data_path, "ego_pose")))
-        elif os.path.exists(os.path.join(self.data_path, "lidar_pose")):
-            total_frames = len(os.listdir(os.path.join(self.data_path, "lidar_pose")))
-        elif os.path.exists(os.path.join(self.data_path, "cameraF100", "keyframes", "undist_images")):
-            total_frames = len(os.listdir(os.path.join(self.data_path, "cameraF100", "keyframes", "undist_images")))
+
+        # get the number of bags
+        self.task_path = os.path.join(self.data_path, "task.json")
+        if os.path.exists(self.task_path):
+            with open(self.task_path, 'r') as f:
+                self.task_info = json.load(f)
+            
+            packagename_list = self.task_info["package_list"]
+            self.scene_path = [os.path.join(self.data_path, pkg_name) for pkg_name in packagename_list]
         else:
-            raise ValueError("Unable to determine the total number of frames. Neither 'ego_pose' nor 'lidar_pose' directories found.")
+            self.scene_path = glob.glob(os.path.join(self.data_path, "ddld*"))
 
         # ---- find the number of synchronized frames ---- #
-        if self.data_cfg.end_timestep == -1:
-            end_timestep = total_frames - 1
-        else:
-            end_timestep = self.data_cfg.end_timestep
         # to make sure the last timestep is included
-        self.end_timestep = end_timestep + 1
+        if self.data_cfg.end_timestep == -1:
+            self.end_timestep = 300
+        else:
+            self.end_timestep = self.data_cfg.end_timestep + 1
         self.start_timestep = self.data_cfg.start_timestep
         
         # ---- create layout for visualization ---- #
@@ -86,10 +90,9 @@ class DrivingDataset(SceneDataset):
         self.pixel_source, self.lidar_source = self.build_data_source()
         assert self.pixel_source is not None and self.lidar_source is not None, \
             "Must have both pixel source and lidar source"
-        if training:
-            self.project_lidar_pts_on_images(
-                delete_out_of_view_points=True
-            )
+        self.project_lidar_pts_on_images(
+            delete_out_of_view_points=True
+        )
         self.aabb = self.get_aabb()
 
         # ---- define train and test indices ---- #
@@ -103,7 +106,7 @@ class DrivingDataset(SceneDataset):
 
         # ---- create split wrappers ---- #
         image_sets = self.build_split_wrapper()
-        self.train_image_set, self.test_image_set, self.full_image_set = image_sets # 给train.py 的接口
+        self.train_image_set, self.test_image_set, self.full_image_set = image_sets
         
         # debug use
         # self.seg_dynamic_instances_in_lidar_frame(-1, frame_idx=0)
@@ -154,27 +157,23 @@ class DrivingDataset(SceneDataset):
         Create the data source for the dataset.
         """
         # ---- create pixel source ---- #
-        pixel_source = import_str(self.data_cfg.pixel_source.type)( # 'datasets.nuscenes.nuscenes_sourceloader.NuScenesPixelSource'
+        pixel_source = import_str(self.data_cfg.pixel_source.type)(
             self.data_cfg.dataset,
             self.data_cfg.pixel_source,
-            self.data_path,
+            self.scene_path,
             self.start_timestep,
             self.end_timestep,
             device=self.device,
         )
         pixel_source.to(self.device)
         
-        # self.train_timesteps = pixel_source.train_ts
-        # self.test_timesteps = pixel_source.test_ts
-        # self.ts2frame = pixel_source.ts2frame
-        # self.frame2ts = pixel_source.frame2ts
-        
         # ---- create lidar source ---- #
         lidar_source = None
         if self.data_cfg.lidar_source.load_lidar:
-            lidar_source = import_str(self.data_cfg.lidar_source.type)( # 'datasets.nuscenes.nuscenes_sourceloader.NuScenesLiDARSource'
+            lidar_source = import_str(self.data_cfg.lidar_source.type)(
                 self.data_cfg.lidar_source,
-                self.data_path,
+                self.scene_path,
+                pixel_source.anchor_pose,
                 self.start_timestep,
                 self.end_timestep,
                 device=self.device,
@@ -182,6 +181,7 @@ class DrivingDataset(SceneDataset):
             lidar_source.to(self.device)
             # assert (pixel_source._unique_normalized_timestamps - lidar_source._unique_normalized_timestamps).abs().sum().item() == 0., \
             #     "The timestamps of the pixel source and the lidar source are not synchronized"
+
         return pixel_source, lidar_source
     
     def get_lidar_samples(
@@ -195,20 +195,27 @@ class DrivingDataset(SceneDataset):
         assert self.lidar_source is not None, "Must have lidar source if you want to get init pcd"
         assert (num_samples is None) != (downsample_factor is None), \
             "Must provide either num_samples or downsample_factor, but not both"
+        pts_xyz = self.lidar_source.pts_xyz
+        colors = self.lidar_source.colors
+        # filter points according to colors
+        colors_mask = colors.sum(dim = -1) < 3
+        pts_xyz = pts_xyz[colors_mask]
+        colors = colors[colors_mask]
+
         if downsample_factor is not None:
-            num_samples = int(len(self.lidar_source.pts_xyz) / downsample_factor)
-        if num_samples > len(self.lidar_source.pts_xyz):
-            logger.warning(f"num_samples {num_samples} is larger than the number of points {len(self.lidar_source.pts_xyz)}")
-            num_samples = len(self.lidar_source.pts_xyz)
+            num_samples = int(len(pts_xyz) / downsample_factor)
+        if num_samples > len(pts_xyz):
+            logger.warning(f"num_samples {num_samples} is larger than the number of points {len(pts_xyz)}")
+            num_samples = len(pts_xyz)
         
         # randomly sample points
-        sampled_idx = torch.randperm(len(self.lidar_source.pts_xyz))[:num_samples]
-        sampled_pts = self.lidar_source.pts_xyz[sampled_idx].to(device)
+        sampled_idx = torch.randperm(len(pts_xyz))[:num_samples]
+        sampled_pts = pts_xyz[sampled_idx].to(device)
         
         # get color if needed
         sampled_color = None
         if return_color:
-            sampled_color = self.lidar_source.colors[sampled_idx].to(device)
+            sampled_color = colors[sampled_idx].to(device)
         
         sampled_time = None
         if return_normalized_time:
@@ -589,6 +596,7 @@ class DrivingDataset(SceneDataset):
                     (cam_points[:, 0] >= 0)
                     & (cam_points[:, 0] < cam.WIDTH)
                     & (cam_points[:, 1] >= 0)
+                    & (cam_points[:, 1] < cam.hoodline)
                     & (cam_points[:, 1] < cam.HEIGHT)
                     & (depth > 0)
                 )
@@ -609,21 +617,21 @@ class DrivingDataset(SceneDataset):
             [i for i in range(self.num_img_timesteps) if i not in test_timesteps]
         )
         logger.info(
-            f"Train timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[train_timesteps]}"
+            f"Train timesteps: \n{self.pixel_source._timesteps}"
         )
-        logger.info(
-            f"Test timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[test_timesteps]}"
-        )
+        # logger.info(
+        #     f"Test timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[test_timesteps]}"
+        # )
 
         # propagate the train and test timesteps to the train and test indices
         train_indices, test_indices = [], []
         for t in range(self.num_img_timesteps):
             if t in train_timesteps:
-                for cam in range(self.pixel_source.num_cams):
-                    train_indices.append(t * self.pixel_source.num_cams + cam)
+                for cam in range(self.pixel_source.num_cams_per_bag):
+                    train_indices.append(t * self.pixel_source.num_cams_per_bag + cam)
             elif t in test_timesteps:
-                for cam in range(self.pixel_source.num_cams):
-                    test_indices.append(t * self.pixel_source.num_cams + cam)
+                for cam in range(self.pixel_source.num_cams_per_bag):
+                    test_indices.append(t * self.pixel_source.num_cams_per_bag + cam)
         logger.info(f"Number of train indices: {len(train_indices)}")
         logger.info(f"Train indices: {train_indices}")
         logger.info(f"Number of test indices: {len(test_indices)}")
@@ -642,102 +650,7 @@ class DrivingDataset(SceneDataset):
             delete_out_of_view_points: bool
                 If True, the lidar points that are not visible from the camera will be removed.
         """
-        for cam in self.pixel_source.camera_data.values():
-            lidar_depth_maps = []
-            for frame_idx in tqdm(
-                range(len(cam)), 
-                desc="Projecting lidar pts on images for camera {}".format(cam.cam_name),
-                dynamic_ncols=True
-            ):
-                timestamp = int(cam.timestamp_list[frame_idx])
-                
-                # get lidar depth on image plane
-                closest_lidar_idx = self.lidar_source.find_closest_timestep(timestamp)
-                lidar_infos = self.lidar_source.get_lidar_rays(closest_lidar_idx)
-                # lidar_infos = self.lidar_source.get_all_lidar_rays()
-                lidar_points = (
-                    lidar_infos["lidar_origins"]
-                    + lidar_infos["lidar_viewdirs"] * lidar_infos["lidar_ranges"]
-                )
-
-                # project lidar points to the image plane
-                if cam.undistort:
-                    new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(
-                                cam.intrinsics[frame_idx].cpu().numpy(),
-                                cam.distortions[frame_idx].cpu().numpy(),
-                                (cam.WIDTH, cam.HEIGHT),
-                                alpha=1,
-                            )
-                    intrinsic_4x4 = torch.nn.functional.pad(
-                            torch.from_numpy(new_camera_matrix), (0, 1, 0, 1)
-                        ).to(self.device)
-                else:
-                    intrinsic_4x4 = torch.nn.functional.pad(
-                        cam.intrinsics[frame_idx], (0, 1, 0, 1)
-                    )
-                intrinsic_4x4[3, 3] = 1.0
-                lidar2img = intrinsic_4x4 @ cam.cam_to_worlds[frame_idx].inverse()
-                lidar_points = (
-                    lidar2img[:3, :3] @ lidar_points.T + lidar2img[:3, 3:4]
-                ).T # (num_pts, 3)
-                
-                depth = lidar_points[:, 2]
-                cam_points = lidar_points[:, :2] / (depth.unsqueeze(-1) + 1e-6) # (num_pts, 2)
-                road_mask = cam.road_masks[frame_idx].to(cam_points.device)
-                valid_mask = (
-                    (cam_points[:, 0] >= 0)
-                    & (cam_points[:, 0] < cam.WIDTH)
-                    & (cam_points[:, 1] >= 0)
-                    & (cam_points[:, 1] < cam.hoodline)
-                    & (cam_points[:, 1] < cam.HEIGHT)
-                    & (depth > 0)
-
-                # valid_mask = (
-                #     (cam_points[:, 0] >= 0)
-                #     & (cam_points[:, 0] < cam.WIDTH)
-                #     & (cam_points[:, 1] >= 0)
-                #     & (cam_points[:, 1] < cam.HEIGHT)
-                #     & (depth > 0)
-                ) # (num_pts, )
-
-                ### ground adaptation
-                off_road_mask_in_valid = road_mask[cam_points[valid_mask, 1].long(), cam_points[valid_mask, 0].long()] == 0
-                valid_mask_clone = valid_mask.clone()
-                valid_mask_clone[valid_mask] = off_road_mask_in_valid
-                valid_mask = valid_mask_clone
-
-                depth = depth[valid_mask]
-                _cam_points = cam_points[valid_mask]
-                depth_map = torch.zeros(
-                    cam.HEIGHT, cam.WIDTH
-                ).to(self.device)
-                depth_map[
-                    _cam_points[:, 1].long(), _cam_points[:, 0].long()
-                ] = depth.squeeze(-1)
-                lidar_depth_maps.append(depth_map)
-                
-                # used to filter out the lidar points that are visible from the camera
-                visible_indices = torch.arange(
-                    self.lidar_source.num_points, device=self.device
-                )[lidar_infos["lidar_mask"]][valid_mask] # [lidar_infos["lidar_mask"]]
-                # breakpoint()
-                self.lidar_source.visible_masks[visible_indices] = True
-                
-                # attribute the color of the nearest pixel to the lidar point
-                points_color = cam.images[frame_idx][
-                    _cam_points[:, 1].long(), _cam_points[:, 0].long()
-                ]
-                # updated_color = copy.deepcopy(cam.images[frame_idx]).cpu().numpy()
-                # updated_color[_cam_points[:, 1].long(), _cam_points[:, 0].long()] = np.array([0, 0, 1.])
-                # cv2.imwrite(f"./tmp/{timestamp}.jpg", updated_color * 255)
-                self.lidar_source.colors[visible_indices] = points_color
-
-            cam.load_depth(
-                torch.stack(lidar_depth_maps, dim=0).to(self.device).float()
-            )
-            
-        if delete_out_of_view_points:
-            self.lidar_source.delete_invisible_pts()
+        pass
             
     def get_novel_render_traj(
         self,
@@ -776,7 +689,7 @@ class DrivingDataset(SceneDataset):
         
         return novel_trajs
 
-    def prepare_novel_view_render_data(self, traj: torch.Tensor,cam_id) -> list:
+    def prepare_novel_view_render_data(self, traj: torch.Tensor, cam_id) -> list:
         """
         Prepare all necessary elements for novel view rendering.
 

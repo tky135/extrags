@@ -79,7 +79,9 @@ class SceneLidarSource(abc.ABC):
         if self._normalized_time is not None:
             self._normalized_time = self._normalized_time.to(device)
         if self.lidar_to_worlds is not None:
-            self.lidar_to_worlds = self.lidar_to_worlds.to(device)
+            # self.lidar_to_worlds = self.lidar_to_worlds.to(device)
+            for key in self.lidar_to_worlds:
+                self.lidar_to_worlds[key].to(device)
         if self.visible_masks is not None:
             self.visible_masks = self.visible_masks.to(device)
         if self.colors is not None:

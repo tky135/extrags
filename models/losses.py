@@ -4,6 +4,7 @@ from typing import Literal, Union
 import torch
 import torch.nn.functional as F
 from torch import autograd, nn, Tensor
+import torchvision
 
 def reduce(
     loss: Union[torch.Tensor, np.ndarray], 
@@ -174,3 +175,138 @@ class DepthLoss(nn.Module):
             raise NotImplementedError(f"Unknown reduction method: {self.reduction}")
 
         return depth_error
+
+class VGGPerceptualLossPix2Pix(nn.Module):
+    """From https://github.com/NVIDIA/pix2pixHD/blob/master/models/networks.py"""
+
+    def __init__(self, weights=None):
+        super().__init__()
+        self.vgg = Vgg19().eval()
+        self.vgg.requires_grad_(False)
+        self.criterion = nn.L1Loss()
+        if weights is None:
+            self.weights = [1.0 / 32, 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
+        else:
+            assert len(weights) == 5, "Expected 5 weights for VGGPerceptualLossPix2Pix"
+            self.weights = weights
+
+    def forward(self, x, y):
+        if len(x.shape) == 3:
+            x = x.unsqueeze(0)
+        if len(y.shape) == 3:
+            y = y.unsqueeze(0)
+        # Assume input is in NHWC format
+        x, y = x.permute(0, 3, 1, 2), y.permute(0, 3, 1, 2)
+        vgg_out = self.vgg(torch.cat([x, y], dim=0))
+        # x_vgg, y_vgg = self.vgg(x), self.vgg(y)
+        loss = 0
+        for i in range(len(vgg_out)):
+            x_vgg, y_vgg = vgg_out[i].chunk(2, dim=0)
+            loss += self.weights[i] * self.criterion(x_vgg, y_vgg.detach())
+        return loss
+
+class Vgg19(torch.nn.Module):
+    def __init__(self):
+        super(Vgg19, self).__init__()
+        vgg_pretrained_features = torchvision.models.vgg19(pretrained=True).features
+        self.slice1 = torch.nn.Sequential(vgg_pretrained_features[:2])
+        self.slice2 = torch.nn.Sequential(vgg_pretrained_features[2:7])
+        self.slice3 = torch.nn.Sequential(vgg_pretrained_features[7:12])
+        self.slice4 = torch.nn.Sequential(vgg_pretrained_features[12:21])
+        self.slice5 = torch.nn.Sequential(vgg_pretrained_features[21:30])
+
+    def forward(self, X):
+        h_relu1 = self.slice1(X)
+        h_relu2 = self.slice2(h_relu1)
+        h_relu3 = self.slice3(h_relu2)
+        h_relu4 = self.slice4(h_relu3)
+        h_relu5 = self.slice5(h_relu4)
+        out = [h_relu1, h_relu2, h_relu3, h_relu4, h_relu5]
+        return out
+
+# class NormalLoss(nn.Module):
+#     def __init__(
+#         self,
+#         loss_type: Literal["l1", "l2", "smooth_l1"] = "l2",
+#         normalize: bool = True,
+#         use_inverse_depth: bool = False,
+#         depth_error_percentile: float = None,
+#         upper_bound: float = 80,
+#         reduction: Literal["mean_on_hit", "mean_on_hw", "sum", "none"] = "mean_on_hit",
+#     ):
+#         super().__init__()
+#         self.loss_type = loss_type
+#         self.normalize = normalize
+#         self.use_inverse_depth = use_inverse_depth
+#         self.upper_bound = upper_bound
+#         self.depth_error_percentile = depth_error_percentile
+#         self.reduction = reduction
+
+#     def _compute_depth_loss(
+#         self,
+#         pred_depth: Tensor,
+#         gt_depth: Tensor,
+#         max_depth: float = 80,
+#         hit_mask: Tensor = None,
+#     ):
+#         pred_depth = pred_depth.squeeze()
+#         gt_depth = gt_depth.squeeze()
+#         if hit_mask is not None:
+#             pred_depth = pred_depth * hit_mask
+#             gt_depth = gt_depth * hit_mask
+        
+#         # cal valid mask to make sure gt_depth is valid
+#         valid_mask = (gt_depth > 0.01) & (gt_depth < max_depth) & (pred_depth > 0.0001)
+        
+#         # normalize depth to (0, 1)
+#         if self.normalize:
+#             pred_depth = safe_normalize_depth(pred_depth[valid_mask], max_depth=max_depth)
+#             gt_depth = safe_normalize_depth(gt_depth[valid_mask], max_depth=max_depth)
+#         else:
+#             pred_depth = pred_depth[valid_mask]
+#             gt_depth = gt_depth[valid_mask]
+        
+#         # inverse the depth map (0, 1) -> (1, +inf)
+#         if self.use_inverse_depth:
+#             pred_depth = 1./pred_depth
+#             gt_depth = 1./gt_depth
+            
+#         # cal loss
+#         if self.loss_type == "smooth_l1":
+#             return F.smooth_l1_loss(pred_depth, gt_depth, reduction="none")
+#         elif self.loss_type == "l1":
+#             return F.l1_loss(pred_depth, gt_depth, reduction="none")
+#         elif self.loss_type == "l2":
+#             return F.mse_loss(pred_depth, gt_depth, reduction="none")
+#         else:
+#             raise NotImplementedError(f"Unknown loss type: {self.loss_type}")
+
+#     def __call__(
+#         self,
+#         pred_depth: Tensor,
+#         gt_depth: Tensor,
+#         hit_mask: Tensor = None,
+#     ):
+#         depth_error = self._compute_depth_loss(pred_depth, gt_depth, self.upper_bound, hit_mask)
+#         if self.depth_error_percentile is not None:
+#             # to avoid outliers. not used for now
+#             depth_error = depth_error.flatten()
+#             depth_error = depth_error[
+#                 depth_error.argsort()[
+#                     : int(len(depth_error) * self.depth_error_percentile)
+#                 ]
+#             ]
+        
+#         if self.reduction == "sum":
+#             depth_error = depth_error.sum()
+#         elif self.reduction == "none":
+#             depth_error = depth_error
+#         elif self.reduction == "mean_on_hit":
+#             depth_error = depth_error.mean()
+#         elif self.reduction == "mean_on_hw":
+#             n = gt_depth.shape[0]*gt_depth.shape[1]
+#             depth_error = depth_error.sum() / n
+#         else:
+#             raise NotImplementedError(f"Unknown reduction method: {self.reduction}")
+
+#         return depth_error

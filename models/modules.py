@@ -10,6 +10,7 @@ from pytorch3d.ops import knn_points
 import nvdiffrast.torch as dr
 from utils.geometry import rotation_6d_to_matrix
 from models.embedder import get_embedder_neus
+import tinycudann as tcnn
 # import wandb
 logger = logging.getLogger()
 
@@ -270,8 +271,9 @@ class AffineTransform(nn.Module):
         # 对于测试数据，取前一个时间和后一个时间的平均值
         embedding_weight = state_dict["embedding.weight"]
         for i in range(embedding_weight.shape[0]):
-            if torch.norm(embedding_weight[i]) == 0 and i - 4 >= 0 and i + 4 < embedding_weight.shape[0]:
-                embedding_weight[i] = (embedding_weight[i - 4] + embedding_weight[i + 4]) / 2
+            if torch.norm(embedding_weight[i]) == 0:
+                raise Exception("embedding weight is zero")
+                embedding_weight[i] = (embedding_weight[i - 1] + embedding_weight[i + 1]) / 2
         state_dict["embedding.weight"] = embedding_weight
         return super().load_state_dict(state_dict, **kwargs)
 class CameraOptModule(torch.nn.Module):
@@ -872,7 +874,7 @@ import cv2
 idx2color = [[157, 234, 50], [211, 211, 202], [233, 74, 127], [85, 37, 136], [250, 220, 2], [157, 234, 50]]
 
 class Ground(nn.Module):
-    def __init__(self, log_dir, dataset):
+    def __init__(self, log_dir):
         super(Ground, self).__init__()
         # initialize everything model
         
@@ -886,7 +888,7 @@ class Ground(nn.Module):
         self.report_freq = 1000
         self.val_freq = 1000
         self.val_mesh_freq = 10000
-        self.batch_size = 1024 * 32
+        self.batch_size = 1024 * 8
         self.validate_resolution_level = 4
         self.learning_rate = 5e-4
         self.learning_rate_alpha = 0.05
@@ -901,7 +903,7 @@ class Ground(nn.Module):
         self.ssim_weight = 0.0
         self.sdf_network = SDFNetwork_2d_hash(**{'d_out': 257, 'd_in': 2, 'd_hidden': 256, 'n_layers': 8, 'skip_in': [4], 'multires': 6, 'bias': 0.5, 'scale': 10.0, 'geometric_init': True, 'weight_norm': True}, base_resolution=256, num_clusters=1).to(self.device)
         self.deviation_network = SingleVarianceNetwork(**{'init_val': 0.3}).to(self.device)
-        self.color_network = RenderingNetwork(**{'d_feature': 64, 'mode': 'xy_embed', 'd_in': 9, 'd_out': 3, 'd_hidden': 256, 'n_layers': 4, 'weight_norm': True, 'multires_view': 4, 'squeeze_out': True}, n_camera=6).to(self.device)
+        self.color_network = RenderingNetwork(**{'d_feature': 64, 'mode': 'xy_embed', 'd_in': 9, 'd_out': 3, 'd_hidden': 256, 'n_layers': 4, 'weight_norm': True, 'multires_view': 4, 'squeeze_out': True}, n_camera=7).to(self.device)
         self.label_network = LabelNetwork(**{'d_feature': 64, 'd_in': 2, 'd_out': 5, 'd_hidden': 256, 'n_layers': 4}).to(self.device)
         self.renderer = NeuSRenderer(None,
                                      self.sdf_network,
@@ -926,13 +928,10 @@ class Ground(nn.Module):
                                        [0, 500, 0, 0],
                                        [0, 0, 9, 0],
                                        [0, 0, 0, 1]], dtype=np.float32)
-        if dataset in ['nuscenes', 'mars']:
-            self.omnire_w2neus_w = torch.tensor([[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]]).type(torch.float32).to(self.device)
-        else:
-            self.omnire_w2neus_w = torch.tensor([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]).type(torch.float32).to(self.device)
+        self.omnire_w2neus_w = torch.tensor([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]).type(torch.float32).to(self.device)
         self.iter_step = 0
         self.base_exp_dir = log_dir
-        self.dataset = dataset
+        # self.dataset = dataset
         if not os.path.exists(self.base_exp_dir):
             os.makedirs(self.base_exp_dir)
         
@@ -1028,20 +1027,28 @@ class Ground(nn.Module):
         # road_mask = label_img_gt_raw > 0
         before_affine = image_infos['before_affine'].cpu().numpy() * 255 if 'before_affine' in image_infos else np.zeros_like(gt_img)
         after_affine = image_infos['after_affine'].cpu().numpy() * 255 if 'after_affine' in image_infos else np.zeros_like(gt_img)
+        rsg = image_infos['rsg'].cpu().numpy() * 255 if 'rsg' in image_infos else np.zeros_like(gt_img)
+        depth_normal = image_infos['depth_normal'].permute(1, 2, 0).numpy() if 'depth_normal' in image_infos else np.zeros_like(gt_img)
+        normal = image_infos['normal'].permute(1, 2, 0).numpy() if 'normal' in image_infos else np.zeros_like(gt_img)
+        
+        depth_blend = image_infos['depth_blend'] if 'depth_blend' in image_infos else np.zeros_like(gt_img)
+        depth_gt = image_infos['depth_gt'] if 'depth_gt' in image_infos else np.zeros_like(gt_img)
         for i in range(img_fine.shape[-1]):
             if len(out_rgb_fine) > 0:
                 rgb_diff = np.abs(after_affine - gt_img)
                 # rgb_diff[mask == 0] = np.array([255, 0, 0])
-                right_col = np.concatenate([img_fine[..., i],
+                right_col = np.concatenate([depth_blend,
                                             gt_img, rgb_diff])
-                left_col = np.concatenate([img_orig[..., i],
+                left_col = np.concatenate([depth_gt,
                                            before_affine, 
                                            after_affine])
+                right_right_col = np.concatenate([rsg, depth_normal, normal])
+                new_col = np.concatenate([img_fine[..., i], img_fine[..., i], img_fine[..., i]])
                 # label_diff = np.abs(label_img[..., i] - label_img_gt)
                 # # label_diff[~road_mask] = 0
                 # label_cat = np.concatenate([label_img[..., i], label_img_gt, label_diff])
                 
-                output_img = np.concatenate([left_col, right_col], axis=1).astype(np.uint8)
+                output_img = np.concatenate([left_col, right_col, right_right_col, new_col], axis=1).astype(np.uint8)
                 cv2.imwrite(os.path.join(self.base_exp_dir,
                                         'validations_fine',
                                         '{:0>8d}_{}_{}.png'.format(self.iter_step, i, image_infos['img_idx'].flatten()[0])),
@@ -1141,20 +1148,18 @@ class Ground(nn.Module):
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(all_points)
             o3d.io.write_point_cloud("ego_points_extrapolated.pcd", pcd)
+        
+        
+        loop = tqdm(range(50000))
+        loop.set_description("initializing sdf with lidar road points")
 
-
-            all_points = []
-            for i in range(len(self.ego_points)):
-                for j in np.arange(0, 1, 0.1):
-                    all_points.append(self.ego_points[i] + self.ego_normals[i] * j)
-            all_points = np.array(all_points)
+        if type(self.ego_normals) == torch.Tensor:
+            self.ego_normals = self.ego_normals.cpu().numpy()
             
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(all_points)
-            o3d.io.write_point_cloud("ego_points.pcd", pcd)
-            import ipdb ; ipdb.set_trace()
-            
-            
+        if type(self.ego_points) == torch.Tensor:
+            self.ego_points = self.ego_points.cpu().numpy()
+        if type(self.ego_normals) == torch.Tensor:
+            self.ego_normals = self.ego_normals.cpu().numpy()
             
         world_ego_points = self.ego_points
         bev_ego_points = world_ego_points @ np.linalg.inv(self.scale_mat[:3, :3]) - self.scale_mat[:3, 3]
@@ -1275,10 +1280,17 @@ class Ground(nn.Module):
         """
         # 训练模式下会多输出计算图上的self.batch_size个变量
         is_train = image_infos['is_train']
+        H, W, _ = image_infos['viewdirs'].shape
+        if not is_train:
+            render_out = {}
+            render_out['rgb_full'] = torch.ones((H, W, 3), device=self.device) * 0.5
+            render_out['opacity_full'] = torch.ones((H, W, 1), device=self.device) * 0.5
+            return render_out
 
         # H, W是原始图片大小
-        H, W, _ = image_infos['viewdirs'].shape
-        
+        if 'road_masks' not in image_infos:
+            image_infos['road_masks'] = torch.ones([H, W], device=image_infos['viewdirs'].device)
+            image_infos['road_masks'][:int(2 / 5 * H), :] = 0    # 为了节约时间，假设前2/5不能是路面
         if image_infos['road_masks'].sum() == 0:
             image_infos['road_masks'][0][0] = 1
 
@@ -1344,9 +1356,14 @@ class Ground(nn.Module):
                                         cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                         camera_encod=camera_encod_train.reshape(-1) if camera_encod is not None else None)
             render_out.update(render_out_train)
-            # if self.iter_step < self.neus_iters:
-            #     render_out['gt_rgb'] = image_infos['pixels'][train_mask == 1]
-            #     return render_out
+            if True:
+                render_out['gt_rgb'] = image_infos['pixels'][train_mask == 1]
+                return render_out
+        if is_train:
+            render_out['gt_rgb'] = image_infos['pixels'][train_mask == 1]
+        render_out['rgb_full'] = torch.ones((H, W, 3), device=c2w.device) * 0.5
+        render_out['opacity_full'] = torch.ones((H, W, 1), device=c2w.device) * 0.5
+        return render_out
         # test
         # save memory render
         rays_o_test = rays_o[test_mask == 1]
@@ -1359,6 +1376,7 @@ class Ground(nn.Module):
         rays_d_test = rays_d_test.reshape(-1, 3).split(self.batch_size)
         out_rgb = []
         out_opacity = []
+        out_normal = []
         # for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
         for i in range(len(rays_o_test)):
             rays_o_batch = rays_o_test[i]
@@ -1390,20 +1408,24 @@ class Ground(nn.Module):
                                                 far_batch,
                                                 cos_anneal_ratio=0,
                                                 background_rgb=background_rgb,
-                                                camera_encod=camera_encod_batch,
-                                                n_importance=16,
-                                                n_samples=128,
-                                                up_sample_steps=2,)
+                                                camera_encod=camera_encod_batch, 
+                                                n_importance=32,
+                                                n_samples=64,
+                                                up_sample_steps=4,)
             out_rgb.append(render_out_test['color_fine'].detach())
             out_opacity.append(render_out_test['weight_sum'].detach())
+            out_normal.append(render_out_test['normals'].detach())
             
             del render_out_test
         render_out['color_fine_test'] = torch.cat(out_rgb, dim=0)
         render_out['weight_sum_test'] = torch.cat(out_opacity, dim=0)
+        render_out['normal_test'] = torch.cat(out_normal, dim=0)
         rgb_full = torch.zeros((H, W, 3), device=c2w.device)
         opacity_full = torch.zeros((H, W), device=c2w.device)
+        normal_full = torch.zeros((H, W, 3), device=c2w.device)
         opacity_full[test_mask == 1] = render_out['weight_sum_test'].squeeze()
         rgb_full[test_mask == 1] = render_out['color_fine_test']
+        normal_full[test_mask == 1] = render_out['normal_test']
         # omnire需要的输出：rgb_full, opacity_full
         # TODO: 增加训练梯度回传
         if is_train:
@@ -1421,6 +1443,7 @@ class Ground(nn.Module):
         # # 随机把非路面部分变成白色
         # if torch.rand(1) < 0.5:
         #     render_out['rgb_full'][road_mask == 0] = 1.0
+        # self.iter_step += 1
         return render_out
     def get_loss(self, render_out, image_infos, camera_infos):
         """
@@ -1483,8 +1506,8 @@ class Ground(nn.Module):
         if self.iter_step == 1:
             print('eikonal_loss weight: {}'.format(bev_to_world_factor * self.igr_weight))
         loss = color_fine_loss +\
-            eikonal_loss * self.igr_weight#  +\
-        #     delta_loss * 0
+            eikonal_loss * self.igr_weight  +\
+            delta_color_loss * 0.05
         # loss = eikonal_loss * self.igr_weight
 
         # loss += delta_color_loss * 0.05 * 10
@@ -1511,12 +1534,11 @@ class Ground(nn.Module):
         self.optimizer.step()
     
     def validate_mesh(self, cluster_idx=0):
-        return
         from sklearn.linear_model import LinearRegression
         from sklearn.preprocessing import PolynomialFeatures
         from sklearn.linear_model import Ridge
         # extrapolate ego points
-        num_future_points = 20
+        num_future_points = 30
         n_points = self.ego_points.shape[0]
         time = np.arange(n_points).reshape(-1, 1)
         degree = 3
@@ -1533,14 +1555,14 @@ class Ground(nn.Module):
             extrapolated_points.append(future_values)
         extrapolated_points = np.column_stack(extrapolated_points)
         extrapolated_ego_points = np.vstack((self.ego_points, extrapolated_points))
-        xy = torch.meshgrid(torch.arange(-1, 1, 0.03 / self.scale_mat[0, 0], device=torch.device("cpu")), torch.arange(-1, 1, 0.03 / self.scale_mat[1, 1], device=torch.device("cpu")))
+        xy = torch.meshgrid(torch.arange(-1, 1, 0.1 / self.scale_mat[0, 0], device=torch.device("cpu")), torch.arange(-1, 1, 0.1 / self.scale_mat[1, 1], device=torch.device("cpu")))
         xy_grid = torch.stack([xy[0], xy[1]], dim=-1)
         num_pixels = xy_grid.shape[0]
         canvas = np.zeros([num_pixels, num_pixels], dtype=np.uint8)
         scale_xy = self.scale_mat[0, 0]
         for x, y, z in extrapolated_ego_points:
-            x = int((x / scale_xy + 1) / 2 * num_pixels)
-            y = int((y / scale_xy + 1) / 2 * num_pixels)
+            x = min(int((x / scale_xy + 1) / 2 * num_pixels), num_pixels - 1)
+            y = min(int((y / scale_xy + 1) / 2 * num_pixels), num_pixels - 1)
             canvas[x, y] = 1
         
         # dilate 
@@ -1557,7 +1579,7 @@ class Ground(nn.Module):
         for i in tqdm(range(len(extrapolated_ego_points)), desc='Filtering'):
             x, y, _ = extrapolated_ego_points[i]
             dist = torch.norm(xy_world - torch.tensor([x, y], dtype=torch.float32, device=xy_world.device), dim=-1)
-            mask = dist < 15
+            mask = dist < 10
             mask_xy = mask_xy | mask
         xy = xy[mask_xy]
         
@@ -1640,5 +1662,36 @@ class Ground(nn.Module):
         
     def get_param_groups(self):
         return {
-            "Ground#"+"all": self.parameters(),
+            "Ground_neus#"+"all": self.parameters(),
         }
+
+
+class CameraEncod(nn.Module):
+    def __init__(self, class_name, n_camera, device, n: int):
+        super().__init__()
+        self.n_camera = n_camera
+        self.class_name = class_name
+        self.device = device
+        self.mlp = tcnn.Network(n_input_dims=3 + self.n_camera, n_output_dims=3, network_config={
+            "otype": "FullyFusedMLP",
+            "activation": "ReLU",
+            "output_activation": "None",
+            "n_neurons": 32,
+            "n_hidden_layers": 2
+        }).to(self.device)
+        
+    def forward(self, x, camera_idx):
+        assert x.shape[-1] == 3
+        orig_shape = x.shape
+        flat_x = x.view(-1, 3)
+        encod = torch.nn.functional.one_hot(camera_idx, num_classes=self.n_camera).expand(flat_x.shape[0], self.n_camera)
+        output_rgb = self.mlp(torch.cat([flat_x, encod], dim=-1)).view(orig_shape)
+        return output_rgb + x
+    
+    
+    def get_param_groups(self):
+        return {
+            
+            self.class_name + "#" + "all": self.parameters(),
+        }
+        

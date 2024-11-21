@@ -14,7 +14,7 @@ from utils.misc import import_str
 from utils.backup import backup_project
 from utils.logging import MetricLogger, setup_logging
 from models.video_utils import render_images, save_videos
-from datasets.driving_dataset import DrivingDataset
+from datasets.multibag_driving_dataset import MultiBagDrivingDataset as DrivingDataset
 
 logger = logging.getLogger()
 current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -55,7 +55,6 @@ def setup(args):
     # update config and create log dir
     cfg.log_dir = log_dir
     cfg.trainer.log_dir = log_dir
-    cfg.trainer.dataset = cfg.data.dataset
     os.makedirs(log_dir, exist_ok=True)
     for folder in ["images", "videos", "metrics", "configs_bk", "buffer_maps", "backup"]:
         os.makedirs(os.path.join(log_dir, folder), exist_ok=True)
@@ -110,7 +109,6 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # build dataset
-    # cfg.data: # dict_keys(['data_root', 'dataset', 'scene_idx', 'start_timestep', 'end_timestep', 'preload_device', 'pixel_source', 'lidar_source'])
     dataset = DrivingDataset(data_cfg=cfg.data)
 
     # setup trainer
@@ -128,10 +126,12 @@ def main(args):
     # NOTE: If resume, gaussians will be loaded from checkpoint
     #       If not, gaussians will be initialized from dataset
     if args.resume_from is not None:
+        trainer.init_gaussians_from_dataset(dataset=dataset)
         trainer.resume_from_checkpoint(
             ckpt_path=args.resume_from,
             load_only_model=True
         )
+        trainer.neus23dgs() # use ground_gs to substitute for ground
         logger.info(
             f"Resuming training from {args.resume_from}, starting at step {trainer.step}"
         )
@@ -141,6 +141,15 @@ def main(args):
             f"Training from scratch, initializing gaussians from dataset, starting at step {trainer.step}"
         )
     
+    # import ipdb; ipdb.set_trace()
+    # DEBUG USE
+    # import open3d as o3d
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(dataset.lidar_source.pts_xyz.cpu().numpy())
+    # pcd.colors = o3d.utility.Vector3dVector(dataset.lidar_source.colors.cpu().numpy())
+    # o3d.io.write_point_cloud(f'./colored_custom_{cfg.data.scene_idx}.pcd', pcd)
+
+
     if args.enable_viewer:
         # a simple viewer for background visualization
         trainer.init_viewer(port=args.viewer_port)
@@ -150,11 +159,11 @@ def main(args):
         "gt_rgbs",
         "rgbs",
         "Background_rgbs",
-        "Dynamic_rgbs",
-        "RigidNodes_rgbs",
-        "DeformableNodes_rgbs",
-        "SMPLNodes_rgbs",
-        # "depths",
+        # "Dynamic_rgbs",
+        # "RigidNodes_rgbs",
+        # "DeformableNodes_rgbs",
+        # "SMPLNodes_rgbs",
+        "depths",
         # "Background_depths",
         # "Dynamic_depths",
         # "RigidNodes_depths",
@@ -188,8 +197,8 @@ def main(args):
     # )
 
     for step in metric_logger.log_every(all_iters, cfg.logging.print_freq):
-        # ----------------------------------------------------------------------------
-        # ----------------------------     Validate     ------------------------------
+        #----------------------------------------------------------------------------
+        #----------------------------     Validate     ------------------------------
         if step % cfg.logging.vis_freq == 0 and cfg.logging.vis_freq > 0:
             logger.info("Visualizing...")
             vis_timestep = np.linspace(
@@ -206,8 +215,8 @@ def main(args):
                 compute_metrics=True,
                 compute_error_map=cfg.render.vis_error,
                 vis_indices=[
-                    vis_timestep * dataset.pixel_source.num_cams + i
-                    for i in range(dataset.pixel_source.num_cams)
+                    vis_timestep * dataset.pixel_source.num_cams_per_bag + i
+                    for i in range(dataset.pixel_source.num_cams_per_bag)
                 ],
             )
             if args.enable_wandb:
@@ -228,7 +237,7 @@ def main(args):
                 num_timestamps=1,
                 keys=render_keys,
                 save_seperate_video=cfg.logging.save_seperate_video,
-                num_cams=dataset.pixel_source.num_cams,
+                num_cams=dataset.pixel_source.num_cams_per_bag,
                 fps=cfg.render.fps,
                 verbose=False,
             )
@@ -237,60 +246,43 @@ def main(args):
                     wandb.log({"image_rendering/" + k: wandb.Image(v)})
             del render_results
             torch.cuda.empty_cache()
+                
+        
         #----------------------------------------------------------------------------
         #----------------------------  training step  -------------------------------
         # prepare for training
         trainer.set_train()
         trainer.preprocess_per_train_step(step=step)
-        next_iter = False
-        while next_iter == False:
-            trainer.optimizer_zero_grad() # zero grad
-            # import ipdb ; ipdb.set_trace()
-            # get data
-            train_step_camera_downscale = trainer._get_downscale_factor()
-            # front train : fisheye train : fisheye test = 2 : 1 : 1
-            if torch.rand(1) < 5.0 / 6.0:
-                if torch.rand(1) < 1.0 / 5.0:
-                    target_cam = [2, 3]
-                else:
-                    target_cam = [0, 1]
-                get_next_train = True
-                while get_next_train:
-                    image_infos, cam_infos = dataset.train_image_set.next(train_step_camera_downscale)
-                    get_next_train = int(cam_infos['cam_id'].flatten()[0].item()) not in target_cam
-            else:
-                get_next_test = True
-                while get_next_test:
-                    image_infos, cam_infos = dataset.test_image_set.next(train_step_camera_downscale)
-                    if cam_infos['cam_id'].flatten()[0].item() < 2:
-                        get_next_test = True
-                    else:
-                        get_next_test = False
-            for k, v in image_infos.items():
-                if isinstance(v, torch.Tensor):
-                    image_infos[k] = v.cuda(non_blocking=True)
-            for k, v in cam_infos.items():
-                if isinstance(v, torch.Tensor):
-                    cam_infos[k] = v.cuda(non_blocking=True)
-            
-            # forward & backward
-            outputs = trainer(image_infos, cam_infos)
-            trainer.update_visibility_filter()
+        trainer.optimizer_zero_grad() # zero grad
+        
+        # get data
+        train_step_camera_downscale = trainer._get_downscale_factor()
+        image_infos, cam_infos = dataset.train_image_set.next(train_step_camera_downscale)
+        if 'road_masks' in image_infos:
+            image_infos['road_masks'][0, 0] = 1
+        for k, v in image_infos.items():
+            if isinstance(v, torch.Tensor):
+                image_infos[k] = v.cuda(non_blocking=True)
+        for k, v in cam_infos.items():
+            if isinstance(v, torch.Tensor):
+                cam_infos[k] = v.cuda(non_blocking=True)
+        
+        # forward & backward
+        outputs = trainer(image_infos, cam_infos)
+        trainer.update_visibility_filter()
 
-            loss_dict = trainer.compute_losses(
-                outputs=outputs,
-                image_infos=image_infos,
-                cam_infos=cam_infos,
-            )
-            # check nan or inf
-            for k, v in loss_dict.items():
-                if torch.isnan(v).any():
-                    raise ValueError(f"NaN detected in loss {k} at step {step}")
-                if torch.isinf(v).any():
-                    raise ValueError(f"Inf detected in loss {k} at step {step}")
-            # print(loss_dict.keys(), image_infos['img_idx'].flatten()[0].item())
-            trainer.backward(loss_dict)
-            next_iter = outputs['next_iter']
+        loss_dict = trainer.compute_losses(
+            outputs=outputs,
+            image_infos=image_infos,
+            cam_infos=cam_infos,
+        )
+        # check nan or inf
+        for k, v in loss_dict.items():
+            if torch.isnan(v).any():
+                raise ValueError(f"NaN detected in loss {k} at step {step}")
+            if torch.isinf(v).any():
+                raise ValueError(f"Inf detected in loss {k} at step {step}")
+        trainer.backward(loss_dict)
         
         # after training step
         trainer.postprocess_per_train_step(step=step)
@@ -314,7 +306,7 @@ def main(args):
         #----------------------------     Saving     --------------------------------
         do_save = step > 0 and (
             (step % cfg.logging.saveckpt_freq == 0) or (step == trainer.num_iters)
-        ) and (args.resume_from is None)
+        )
         if do_save:  
             trainer.save_checkpoint(
                 log_dir=cfg.log_dir,
@@ -330,6 +322,7 @@ def main(args):
         ):
             logger.info("Caching image error...")
             trainer.set_eval()
+            # with torch.no_grad():
             dataset.pixel_source.update_downscale_factor(
                 1 / dataset.pixel_source.buffer_downscale
             )
@@ -363,6 +356,7 @@ def main(args):
         dataset=dataset,
         render_keys=render_keys,
         args=args,
+        is_train=True
     )
     
     if args.enable_viewer:
@@ -382,9 +376,9 @@ if __name__ == "__main__":
     
     # wandb logging part
     parser.add_argument("--enable_wandb", action="store_true", help="enable wandb logging")
-    parser.add_argument("--entity", default="ziyc", type=str, help="wandb entity name")
-    parser.add_argument("--project", default="drivestudio", type=str, help="wandb project name, also used to enhance log_dir")
-    parser.add_argument("--run_name", default="omnire", type=str, help="wandb run name, also used to enhance log_dir")
+    parser.add_argument("--entity", default="ziyu-sjtu", type=str, help="wandb entity name")
+    parser.add_argument("--project", default="UrbanGSim", type=str, help="wandb project name, also used to enhance log_dir")
+    parser.add_argument("--run_name", default="debug", type=str, help="wandb run name, also used to enhance log_dir")
     
     # viewer
     parser.add_argument("--enable_viewer", action="store_true", help="enable viewer")
@@ -394,5 +388,5 @@ if __name__ == "__main__":
     parser.add_argument("opts", help="Modify config options using the command-line", default=None, nargs=argparse.REMAINDER)
     
     args = parser.parse_args()
-    args.enable_wandb = True
+    # args.enable_wandb = True
     final_step = main(args)

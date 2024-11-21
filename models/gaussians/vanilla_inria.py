@@ -1,16 +1,6 @@
 """
-Filename: 3dgs.py
-
-Author: Ziyu Chen (ziyu.sjtu@gmail.com)
-
-Description:
-Unofficial implementation of 3DGS based on the work by Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 
-This implementation is modified from the nerfstudio GaussianSplattingModel.
-
-- Original work by Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis.
-- Codebase reference: nerfstudio GaussianSplattingModel (https://github.com/nerfstudio-project/nerfstudio/blob/gaussian-splatting/nerfstudio/models/gaussian_splatting.py)
-
 Original paper: https://arxiv.org/abs/2308.04079
+Parts of the code are adapted from  https://github.com/BaowenZ/RaDe-GS
 """
 
 from typing import Dict, List, Tuple
@@ -20,76 +10,12 @@ import logging
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
-import torch.nn.functional as F
+
 from models.gaussians.basics import *
 
 logger = logging.getLogger()
-def normalize(v):
-    """Normalizes a 3D vector."""
-    norm = np.linalg.norm(v, axis=-1, keepdims=True)
-    return np.where(norm > 0, v / norm, v)
 
-def normals_to_quaternions(normals):
-    # Ensure the normals are unit vectors
-    normals = normalize(normals)
-    
-    # Reference normal vector [0, 0, 1] (z-axis)
-    ref_vector = np.array([0, 0, 1])
-    
-    # Compute the axis of rotation (cross product of each normal and ref_vector)
-    rotation_axis = np.cross(ref_vector, normals)
-    rotation_axis = normalize(rotation_axis)  # Normalize the axis
-    
-    # Compute the angle between the reference vector and each normal (dot product)
-    dot_product = np.dot(normals, ref_vector)
-    angles = np.arccos(np.clip(dot_product, -1.0, 1.0))  # Ensure the values are within [-1, 1]
-    
-    # Convert axis-angle to quaternions
-    half_angles = angles / 2.0
-    sin_half_angles = np.sin(half_angles)
-    
-    quaternions = np.zeros((normals.shape[0], 4))
-    quaternions[:, 0] = np.cos(half_angles)  # Scalar part (w)
-    quaternions[:, 1:] = rotation_axis * sin_half_angles[:, None]  # Vector part (x, y, z)
-    
-    # Handle cases where the normal is already [0, 0, 1] (aligned with z-axis)
-    aligned_mask = np.isclose(normals, [0, 0, 1]).all(axis=1)
-    quaternions[aligned_mask] = np.array([1, 0, 0, 0])  # Identity quaternion for no rotation
-    
-    return quaternions
-
-def quaternion_multiply(q1, q2):
-    """Multiplies two quaternions."""
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
-    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-    return np.array([w, x, y, z])
-
-def quaternion_conjugate(q):
-    """Returns the conjugate of a quaternion."""
-    w, x, y, z = q
-    return np.array([w, -x, -y, -z])
-
-def apply_quaternion_rotation(quaternions, points):
-    """Applies a quaternion rotation to a set of 3D points."""
-    rotated_points = []
-    
-    for q, p in zip(quaternions, points):
-        # Convert the point to a quaternion (pure quaternion with w=0)
-        p_quat = np.array([0, p[0], p[1], p[2]])
-        
-        # Perform the rotation: p' = q * p * q^(-1)
-        q_conjugate = quaternion_conjugate(q)
-        rotated_p_quat = quaternion_multiply(quaternion_multiply(q, p_quat), q_conjugate)
-        
-        # Extract the rotated point (ignore the w component)
-        rotated_points.append(rotated_p_quat[1:])
-    
-    return np.array(rotated_points)
-class VanillaGaussians(nn.Module):
+class VanillaGaussians_inria(nn.Module):
 
     def __init__(
         self,
@@ -122,9 +48,10 @@ class VanillaGaussians(nn.Module):
         
         # init models
         self.xys_grad_norm = None
+        self.xys_grad_norm_abs = None
         self.max_2Dsize = None
-        self.under_ground = None
         self._means = torch.zeros(1, 3, device=self.device)
+        self.under_ground = None
         if self.ball_gaussians:
             self._scales = torch.zeros(1, 1, device=self.device)
         else:
@@ -132,58 +59,34 @@ class VanillaGaussians(nn.Module):
                 self._scales = torch.zeros(1, 2, device=self.device)
             else:
                 self._scales = torch.zeros(1, 3, device=self.device)
-        self._quats = torch.ones(1, 4, device=self.device)
+        self._quats = torch.zeros(1, 4, device=self.device)
         self._opacities = torch.zeros(1, 1, device=self.device)
         self._features_dc = torch.zeros(1, 3, device=self.device)
         self._features_rest = torch.zeros(1, num_sh_bases(self.sh_degree) - 1, 3, device=self.device)
-        self.ground_gs = False
         
     @property
     def sh_degree(self):
         return self.ctrl_cfg.sh_degree
 
-    def create_from_pcd(self, init_means: torch.Tensor, init_colors: torch.Tensor, from_lidar: torch.Tensor, init_opacity: float = 0.1) -> None:
+    def create_from_pcd(self, init_means: torch.Tensor, init_colors: torch.Tensor,init_opacity: float = 0.1) -> None:
         self._means = Parameter(init_means)
         
-        distances, _ = k_nearest_sklearn(self._means.data, 4)
-        
-        
-        # estimate normals
-        pcd_data = self._means.data.cpu().numpy()
-        import open3d as o3d 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pcd_data)
-        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.3, max_nn=10))
-        normals = np.asarray(pcd.normals)
-        mask = normals[:, 2] < 0
-        normals[mask] = -normals[mask]
-        
-        
-        o3d.io.write_point_cloud("test.ply", pcd)
-        quats = normals_to_quaternions(normals)
-        
-        
-        # verification
-        # tmp = np.zeros_like(normals)
-        # tmp[:, 2] = 1
-        # import ipdb ; ipdb.set_trace()
-        # apply_quaternion_rotation(quats, tmp)
-        # calculate normal
-        
+        distances, _ = k_nearest_sklearn(self._means.data, 3)
         distances = torch.from_numpy(distances)
         # find the average of the three nearest neighbors for each point and use that as the scale
         avg_dist = distances.mean(dim=-1, keepdim=True).to(self.device)
+        if init_opacity == 1.0:
+            self._means.data[:, 2] = self._means.data[:, 2] - avg_dist.squeeze(-1) / 4
+            self.ball_gaussians = True
 
-        if self.ball_gaussians:
+        if self.ball_gaussians and init_opacity == 1.0:
             self._scales = Parameter(torch.log(avg_dist.repeat(1, 1)))
         else:
             if self.gaussian_2d:
                 self._scales = Parameter(torch.log(avg_dist.repeat(1, 2)))
-                # 如果是2dgs用估计的法向量
-                self._quats = Parameter(torch.from_numpy(quats).float().to(self.device))
             else:
                 self._scales = Parameter(torch.log(avg_dist.repeat(1, 3)))
-                self._quats = Parameter(random_quat_tensor(self.num_points).to(self.device))
+        self._quats = Parameter(random_quat_tensor(self.num_points).to(self.device))
         dim_sh = num_sh_bases(self.sh_degree)
 
         fused_color = RGB2SH(init_colors) # float range [0, 1] 
@@ -196,7 +99,6 @@ class VanillaGaussians(nn.Module):
         self._features_dc = Parameter(shs[:, 0, :])
         self._features_rest = Parameter(shs[:, 1:, :])
         self._opacities = Parameter(torch.logit(init_opacity * torch.ones(self.num_points, 1, device=self.device)))
-        self.from_lidar = from_lidar.float()
         
     @property
     def colors(self):
@@ -204,6 +106,12 @@ class VanillaGaussians(nn.Module):
             return SH2RGB(self._features_dc)
         else:
             return torch.sigmoid(self._features_dc)
+    @property
+    def shs(self):
+        return torch.cat([self._features_dc[:, None, :], self._features_rest], dim=1)
+    @property
+    def realtime_sh_degree(self):
+        return min(self.step // self.ctrl_cfg.sh_degree_interval, self.sh_degree)
     @property
     def shs_0(self):
         return self._features_dc
@@ -266,15 +174,27 @@ class VanillaGaussians(nn.Module):
             full_mask = torch.zeros(self.num_points, device=radii.device, dtype=torch.bool)
             full_mask[self.filter_mask] = visible_mask
             
-            grads = xys_grad.norm(dim=-1)
+            if self.ctrl_cfg.get('use_abs_grad', 'False'):
+                grads = torch.abs(xys_grad.norm(dim=-1))
+            else:
+                grads = xys_grad.norm(dim=-1)
+            # breakpoint()
             if self.xys_grad_norm is None:
                 self.xys_grad_norm = torch.zeros(self.num_points, device=grads.device, dtype=grads.dtype)
-                self.xys_grad_norm[self.filter_mask] = grads
+                self.xys_grad_norm[self.filter_mask] = torch.norm(xys_grad[...,:2], dim=-1)
                 self.vis_counts = torch.ones_like(self.xys_grad_norm)
             else:
                 assert self.vis_counts is not None
                 self.vis_counts[full_mask] = self.vis_counts[full_mask] + 1
-                self.xys_grad_norm[full_mask] = grads[visible_mask] + self.xys_grad_norm[full_mask]
+                self.xys_grad_norm[full_mask] = torch.norm(xys_grad[full_mask,:2], dim=-1) + self.xys_grad_norm[full_mask]
+            
+            if self.xys_grad_norm_abs is None:
+                self.xys_grad_norm_abs = torch.zeros(self.num_points, device=grads.device, dtype=grads.dtype)
+                self.xys_grad_norm_abs[self.filter_mask] = torch.norm(xys_grad[...,2:], dim=-1)
+            
+            else:
+                assert self.vis_counts is not None
+                self.xys_grad_norm_abs[full_mask] = torch.norm(xys_grad[full_mask,2:], dim=-1) + self.xys_grad_norm_abs[full_mask]
 
             # update the max screen size, as a ratio of number of pixels
             if self.max_2Dsize is None:
@@ -315,13 +235,47 @@ class VanillaGaussians(nn.Module):
                 
                 avg_grad_norm = self.xys_grad_norm / self.vis_counts
                 high_grads = (avg_grad_norm > self.ctrl_cfg.densify_grad_thresh).squeeze()
+                ### TODO: check if this is the right threshold
+                # use the same densification strategy as GOF https://github.com/autonomousvision/gaussian-opacity-fields
+                avg_grad_norm_abs = self.xys_grad_norm_abs / self.vis_counts
+                avg_grad_norm_abs[avg_grad_norm_abs.isnan()] = 0.0
+                ratio = (avg_grad_norm >= self.ctrl_cfg.densify_grad_thresh).float().mean()
+                # breakpoint()
+                Q = torch.quantile(avg_grad_norm_abs.reshape(-1), 1 - ratio)
+                print(f'{self.step} Q: {Q}')
+                high_abs_grads = (avg_grad_norm_abs > Q).squeeze()
+
+                high_grads = torch.logical_or(high_grads, high_abs_grads)
+
+                # if self.step>500 and self.step%100==0:
+                #     # breakpoint()
+                #     tmp_dir = '/home/noah.pan/personal/omnire/debug_rade-gs'
+                #     import os
+                #     os.makedirs(tmp_dir,exist_ok=True)
+                #     import matplotlib.pyplot as plt
+                #     tmp_grads = avg_grad_norm.detach().cpu().numpy()
+                #     tmp_2dsize= self.max_2Dsize.detach().cpu().numpy()
+                      
+                #     plt.hist(tmp_grads, range=(0,0.1),bins=100)
+                #     plt.savefig(os.path.join(tmp_dir,f'{self.step}_grads.png'))
+                #     plt.close()
+
+                #     plt.hist(tmp_2dsize, range=(0,1))
+                #     plt.savefig(os.path.join(tmp_dir,f'{self.step}_2dsizes.png'))
+                #     plt.close()
+
                 
                 splits = (
                     self.get_scaling.max(dim=-1).values > \
                         self.ctrl_cfg.densify_size_thresh * self.scene_scale
                 ).squeeze()
+                # print('tmp_splits', splits.sum())
+                # if self.step>500 and self.step%100==0:
+                #     breakpoint()
+
                 if self.step < self.ctrl_cfg.stop_screen_size_at:
                     splits |= (self.max_2Dsize > self.ctrl_cfg.split_screen_size).squeeze()
+                
                 splits &= high_grads
                 nsamps = self.ctrl_cfg.n_split_samples
                 (
@@ -338,6 +292,7 @@ class VanillaGaussians(nn.Module):
                     self.get_scaling.max(dim=-1).values <= \
                         self.ctrl_cfg.densify_size_thresh * self.scene_scale
                 ).squeeze()
+                # print('tmp_dups', dups.sum())
                 dups &= high_grads
                 (
                     dup_means,
@@ -346,7 +301,7 @@ class VanillaGaussians(nn.Module):
                     dup_opacities,
                     dup_scales,
                     dup_quats,
-                    dep_under_ground
+                    dup_under_ground
                 ) = self.dup_gaussians(dups)
                 
                 self._means = Parameter(torch.cat([self._means.detach(), split_means, dup_means], dim=0))
@@ -356,14 +311,13 @@ class VanillaGaussians(nn.Module):
                 self._opacities = Parameter(torch.cat([self._opacities.detach(), split_opacities, dup_opacities], dim=0))
                 self._scales = Parameter(torch.cat([self._scales.detach(), split_scales, dup_scales], dim=0))
                 self._quats = Parameter(torch.cat([self._quats.detach(), split_quats, dup_quats], dim=0))
-                self.from_lidar = torch.cat([self.from_lidar, torch.zeros_like(split_scales[:, 0]), torch.zeros_like(dup_scales[:, 0])], dim=0)
                 
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
                     [self.max_2Dsize, torch.zeros_like(split_scales[:, 0]), torch.zeros_like(dup_scales[:, 0])],
                     dim=0,
                 )
-                self.under_ground = torch.cat([self.under_ground, split_under_ground, dep_under_ground], dim=0)
+                self.under_ground = torch.cat([self.under_ground, split_under_ground, dup_under_ground], dim=0)
                 
                 split_idcs = torch.where(splits)[0]
                 param_groups = self.get_gaussian_param_groups()
@@ -380,16 +334,13 @@ class VanillaGaussians(nn.Module):
                 param_groups = self.get_gaussian_param_groups()
                 remove_from_optim(optimizer, deleted_mask, param_groups)
             print(f"Class {self.class_prefix} left points: {self.num_points}")
-            logger.info("number of lidar points: " + str(self.from_lidar.sum()))
-            print("number of lidar points: ", self.from_lidar.sum())
                     
             # reset opacity
-            if self.step % reset_interval == self.ctrl_cfg.refine_interval and self.step < self.ctrl_cfg.stop_split_at and not self.ground_gs:
-                print("resetting opacity at step", self.step)
+            if self.step % reset_interval == self.ctrl_cfg.refine_interval:
                 # NOTE: in nerfstudio, reset_value = cull_alpha_thresh * 0.8
                     # we align to original repo of gaussians spalting
                 reset_value = torch.min(self.get_opacity.data,
-                                        torch.ones_like(self._opacities.data) * 0.01)
+                                        torch.ones_like(self._opacities.data) * self.ctrl_cfg.reset_alpha_value)
                 self._opacities.data = torch.logit(reset_value)
                 # reset the exp of optimizer
                 for group in optimizer.param_groups:
@@ -399,6 +350,7 @@ class VanillaGaussians(nn.Module):
                         param_state["exp_avg"] = torch.zeros_like(param_state["exp_avg"])
                         param_state["exp_avg_sq"] = torch.zeros_like(param_state["exp_avg_sq"])
             self.xys_grad_norm = None
+            self.xys_grad_norm_abs = None
             self.vis_counts = None
             self.max_2Dsize = None
 
@@ -409,31 +361,19 @@ class VanillaGaussians(nn.Module):
         n_bef = self.num_points
         # cull transparent ones
         culls = (self.get_opacity.data < self.ctrl_cfg.cull_alpha_thresh).squeeze()
-        if self.step > self.ctrl_cfg.reset_alpha_interval or self.ground_gs:
+        if self.step > self.ctrl_cfg.reset_alpha_interval:
             # cull huge ones
-            if self.ground_gs:
-                toobigs = (
-                    torch.exp(self._scales).max(dim=-1).values > 
-                    5
-                ).squeeze()
-            else:
-                toobigs = (
-                    torch.exp(self._scales).max(dim=-1).values > 
-                    self.ctrl_cfg.cull_scale_thresh * self.scene_scale
-                ).squeeze()
+            toobigs = (
+                torch.exp(self._scales).max(dim=-1).values > 
+                self.ctrl_cfg.cull_scale_thresh * self.scene_scale
+            ).squeeze()
             culls = culls | toobigs
             if self.step < self.ctrl_cfg.stop_screen_size_at:
                 # cull big screen space
                 assert self.max_2Dsize is not None
                 culls = culls | (self.max_2Dsize > self.ctrl_cfg.cull_screen_size).squeeze()
-        
-        # cull underground ones
-        if self.under_ground is not None:
-            culls = culls | self.under_ground.squeeze(-1)
-            
-        # only cull too bigs for ground_gs
-        if self.ground_gs:
-            culls = toobigs
+        assert self.under_ground is not None
+        culls = culls | self.under_ground.squeeze(-1)
         self._means = Parameter(self._means[~culls].detach())
         self._scales = Parameter(self._scales[~culls].detach())
         self._quats = Parameter(self._quats[~culls].detach())
@@ -441,9 +381,6 @@ class VanillaGaussians(nn.Module):
         self._features_dc = Parameter(self._features_dc[~culls].detach())
         self._features_rest = Parameter(self._features_rest[~culls].detach())
         self._opacities = Parameter(self._opacities[~culls].detach())
-        self.from_lidar = self.from_lidar[~culls]
-        
-        # 不更新self.under_ground, base会更新
 
         print(f"     Cull: {n_bef - self.num_points}")
         return culls
@@ -494,160 +431,14 @@ class VanillaGaussians(nn.Module):
         dup_quats = self._quats[dup_mask]
         dup_under_ground = self.under_ground[dup_mask]
         return dup_means, dup_feature_dc, dup_feature_rest, dup_opacities, dup_scales, dup_quats, dup_under_ground
-    def generate_offset_points(self, points, offset=0.01):
-        """
-        Generate offset points by adding/subtracting offset to x,y coordinates
-        
-        Args:
-            points (torch.Tensor): Input points tensor of shape [N, 3]
-            offset (float): Offset value to add/subtract (default: 0.01)
-            
-        Returns:
-            torch.Tensor: Offset points tensor of shape [N, 4, 3]
-        """
-        # Create offset matrix [4, 2] for x,y coordinates
-        offsets = torch.tensor([
-            [-offset, -offset],  # bottom-left
-            [-offset, offset],   # top-left
-            [offset, -offset],   # bottom-right
-            [offset, offset]     # top-right
-        ], device=points.device, dtype=points.dtype)
-        
-        # Expand points to [N, 1, 3] and offsets to [1, 4, 2]
-        expanded_points = points.unsqueeze(1)  # [N, 1, 3]
-        expanded_offsets = offsets.unsqueeze(0)  # [1, 4, 2]
-        
-        # Create output tensor [N, 4, 3]
-        result = expanded_points.expand(-1, 4, -1).clone()
-        
-        # Add offsets to x,y coordinates
-        result[..., :2] += expanded_offsets
-        
-        return result
-    def estimate_plane_normals(self, points):
-        """
-        Estimate normal vectors for multiple planes using SVD.
-        
-        Args:
-            points: Tensor of shape [N, 4, 3] where:
-                N is the batch size
-                4 is the number of points per plane
-                3 is the xyz coordinates
-        
-        Returns:
-            normals: Tensor of shape [N, 3] containing unit normal vectors
-        """
-        # Center the points by subtracting the mean
-        # Shape: [N, 4, 3] -> [N, 1, 3]
-        centroids = torch.mean(points, dim=1, keepdim=True)
-        # Shape: [N, 4, 3]
-        centered_points = points - centroids
-        
-        # Compute the covariance matrix for each set of points
-        # Shape: [N, 3, 3]
-        covariance = torch.bmm(centered_points.transpose(1, 2), centered_points)
-        
-        # Perform batch SVD
-        # u: [N, 3, 3], s: [N, 3], v: [N, 3, 3]
-        u, s, v = torch.svd(covariance)
-        
-        # The normal vector is the last right singular vector (column of v)
-        # Shape: [N, 3]
-        normals = v[..., -1]
-        
-        # Normalize the vectors to unit length
-        normals = F.normalize(normals, p=2, dim=-1)
-        
-        return normals
-    def knn_normal(self, points):
-        with torch.no_grad():
-            # distances, indices = k_nearest_sklearn(points, 32)
-            offseted_points = self.generate_offset_points(points, 0.05).reshape(-1, 3)
-            elevation = self.sdf_network((offseted_points + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, :1] * 9
-            offseted_points[:, 2] = elevation.squeeze()
-            offseted_points = offseted_points.reshape(-1, 4, 3)
-            return self.estimate_plane_normals(offseted_points)
-            
-            # normals = torch.zeros_like(points)
-    def quaternion_to_vector(self, quaternions, reference_vector=None):
-        """
-        Convert quaternions to normal vectors in a differentiable way.
-        
-        Args:
-            quaternions: Tensor of shape [..., 4] containing quaternions in format (w, x, y, z)
-                        where w is the scalar component and (x, y, z) is the vector part.
-                        Quaternions should be normalized (unit quaternions).
-            reference_vector: Optional tensor of shape [..., 3] containing the reference vector
-                            to rotate. Defaults to [0, 0, 1] if None.
-        
-        Returns:
-            Tensor of shape [..., 3] containing the rotated vectors.
-        """
-        if not torch.is_tensor(quaternions):
-            quaternions = torch.tensor(quaternions, dtype=torch.float32)
-        
-        # Ensure quaternions are normalized
-        quaternions = F.normalize(quaternions, p=2, dim=-1)
-        
-        # Extract components
-        w = quaternions[..., 0]
-        x = quaternions[..., 1]
-        y = quaternions[..., 2]
-        z = quaternions[..., 3]
-        
-        if reference_vector is None:
-            # Default to rotating [0, 0, 1]
-            reference_vector = torch.zeros_like(quaternions[..., :3])
-            reference_vector[..., 2] = 1.0
-        
-        # Compute rotation using quaternion multiplication
-        # v' = q * v * q^(-1)
-        # For unit quaternions, q^(-1) = q_conjugate = [w, -x, -y, -z]
-        
-        # Pre-compute common terms
-        xx = x * x
-        yy = y * y
-        zz = z * z
-        wx = w * x
-        wy = w * y
-        wz = w * z
-        xy = x * y
-        xz = x * z
-        yz = y * z
-        
-        # Rotation matrix elements
-        r00 = 1 - 2 * (yy + zz)
-        r01 = 2 * (xy - wz)
-        r02 = 2 * (xz + wy)
-        
-        r10 = 2 * (xy + wz)
-        r11 = 1 - 2 * (xx + zz)
-        r12 = 2 * (yz - wx)
-        
-        r20 = 2 * (xz - wy)
-        r21 = 2 * (yz + wx)
-        r22 = 1 - 2 * (xx + yy)
-        
-        # Reshape for batch matrix multiplication
-        rotation_matrix = torch.stack([
-            torch.stack([r00, r01, r02], dim=-1),
-            torch.stack([r10, r11, r12], dim=-1),
-            torch.stack([r20, r21, r22], dim=-1)
-        ], dim=-2)
-        
-        # Perform rotation
-        rotated_vector = torch.matmul(rotation_matrix, reference_vector.unsqueeze(-1)).squeeze(-1)
-        
-        # Normalize output vector
-        result = F.normalize(rotated_vector, p=2, dim=-1)
-        
-        return result
+
     def get_gaussians(self, cam: dataclass_camera) -> Dict:
         filter_mask = torch.ones_like(self._means[:, 0], dtype=torch.bool)
         self.filter_mask = filter_mask
         
         # get colors of gaussians
         colors = torch.cat((self._features_dc[:, None, :], self._features_rest), dim=1)
+        shs = colors
         if self.sh_degree > 0:
             viewdirs = self._means.detach() - cam.camtoworlds.data[..., :3, 3]  # (N, 3)
             viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
@@ -663,65 +454,22 @@ class VanillaGaussians(nn.Module):
         actovated_colors = rgbs
         
         # collect gaussians information
-        if self.in_test_set or getattr(self, "from_lidar", None) is None or not self.training:
-            output_means = self._means
-        else:
-            output_means = self._means.detach() * self.from_lidar.unsqueeze(-1) + self._means * (1 - self.from_lidar).unsqueeze(-1)
-        if self.ground_gs:
-            # 验证
-            # self.sdf_network.sdf((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]))
-            with torch.no_grad():
-                elevation = (self.sdf_network((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, :1] * 9).detach()
-            output_means = torch.cat([output_means[:, :2], elevation.detach()], dim=-1)
-            if self.step % 10 == 0:
-                normal_align_loss = 1 - torch.abs(torch.sum(self.quaternion_to_vector(activated_rotations[filter_mask]) * self.knn_normal(output_means[filter_mask]), dim=-1))
-                normal_align_loss = normal_align_loss.mean()
-            else:
-                normal_align_loss = torch.tensor(0.0).to(self.device)
-            # normals = 
-            gs_dict = dict(
-                    _means=output_means[filter_mask],
-                    _opacities=activated_opacities[filter_mask],
-                    _rgbs=actovated_colors[filter_mask],
-                    _scales=activated_scales[filter_mask],
-                    _quats=activated_rotations[filter_mask],
-                    align_error=normal_align_loss,
-                )
-            # 计算法向量
-            
-        else:
-            gs_dict = dict(
-                    _means=output_means[filter_mask],
-                    _opacities=activated_opacities[filter_mask],
-                    _rgbs=actovated_colors[filter_mask],
-                    _scales=activated_scales[filter_mask],
-                    _quats=activated_rotations[filter_mask],
-                )
-        # if self.step < 10000:
-        #     gs_dict = dict(
-        #         _means=self._means[filter_mask].detach(),
-        #         _opacities=activated_opacities[filter_mask],
-        #         _rgbs=actovated_colors[filter_mask],
-        #         _scales=activated_scales[filter_mask],
-        #         _quats=activated_rotations[filter_mask],
-        #     )
-        # else:
-        #     gs_dict = dict(
-        #         _means=self._means[filter_mask],
-        #         _opacities=activated_opacities[filter_mask],
-        #         _rgbs=actovated_colors[filter_mask],
-        #         _scales=activated_scales[filter_mask],
-        #         _quats=activated_rotations[filter_mask],
-        #     )
+        gs_dict = dict(
+            _means=self._means[filter_mask],
+            _opacities=activated_opacities[filter_mask],
+            _rgbs=actovated_colors[filter_mask],
+            _scales=activated_scales[filter_mask],
+            _quats=activated_rotations[filter_mask],
+            _shs = shs[filter_mask],
+            _realtime_sh_degree = torch.tensor(n).to(device=self.device),
+        )
         
         # check nan and inf in gs_dict
-        for k, v in gs_dict.items():
-            if torch.isnan(v).any():
-                print(f"NaN detected in gaussian {k} at step {self.step}")
-                import ipdb ; ipdb.set_trace()
-
-            if torch.isinf(v).any():
-                raise ValueError(f"Inf detected in gaussian {k} at step {self.step}")
+        # for k, v in gs_dict.items():
+        #     if torch.isnan(v).any():
+        #         raise ValueError(f"NaN detected in gaussian {k} at step {self.step}")
+        #     if torch.isinf(v).any():
+        #         raise ValueError(f"Inf detected in gaussian {k} at step {self.step}")
                 
         return gs_dict
     
@@ -735,9 +483,6 @@ class VanillaGaussians(nn.Module):
             if self.step % step_interval == 0:
                 # scale regularization
                 scale_exp = self.get_scaling
-                if self.gaussian_2d:
-                    scale_exp = scale_exp[:, :2]
-                    max_gauss_ratio = 5.0
                 scale_reg = torch.maximum(scale_exp.amax(dim=-1) / (scale_exp.amin(dim=-1) + 1e-8), torch.tensor(max_gauss_ratio)) - max_gauss_ratio
                 scale_reg = scale_reg.mean() * w
                 loss_dict["sharp_shape_reg"] = scale_reg
@@ -751,7 +496,7 @@ class VanillaGaussians(nn.Module):
             loss_dict["flatten"] = flatten_loss * flatten_reg.w
         
         sparse_reg = self.reg_cfg.get("sparse_reg", None)
-        if sparse_reg and self.step > sparse_reg.start_step:
+        if sparse_reg:
             if (self.cur_radii > 0).sum():
                 opacity = torch.sigmoid(self._opacities)
                 opacity = opacity.clamp(1e-6, 1-1e-6)

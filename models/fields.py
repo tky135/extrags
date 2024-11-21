@@ -605,13 +605,13 @@ class SDFNetwork_2d_hash(nn.Module):
         # raise Exception
     
     
-    def forward(self, inputs, output_height=False, delta=True, gradient=False, force_cluster=None):
+    def forward(self, inputs, output_height=False, delta=True, gradient=False, force_cluster=None, normal=False):
 
         if force_cluster is not None:
-            return self.forward_core(inputs, force_cluster, output_height, delta, gradient)
+            return self.forward_core(inputs, force_cluster, output_height, delta, gradient, normal=normal)
         
         if self.num_clusters == 1:
-            return self.forward_core(inputs, 0, output_height, delta, gradient)
+            return self.forward_core(inputs, 0, output_height, delta, gradient, normal=normal)
         # get cluster indices for inputs
         raise Exception("Not implemented")
         world_input_xyz = inputs @ torch.from_numpy(self.dataset.scale_mat[:3, :3]).cuda().float()
@@ -638,20 +638,22 @@ class SDFNetwork_2d_hash(nn.Module):
         return all_outputs
                 
                 
-    def forward_core(self, inputs, cluster_idx, output_height=False, delta=True, gradient=False):
-
+    def forward_core(self, inputs, cluster_idx, output_height=False, delta=True, gradient=False, normal=False):
         if delta:
-            with torch.no_grad():
-                                
-                
-                ### use ground truth prior
-                # world_xy = inputs[:, :2] * 500
-                # nn_idx = nn_2d(self.prior_network.world_ego_points[:, :2], world_xy)
-                # prior_z = -self.prior_network.world_coff_A[nn_idx] * (world_xy[:, 0] - self.prior_network.world_ego_points[nn_idx, 0]) - self.prior_network.world_coff_B[nn_idx] * (world_xy[:, 1] - self.prior_network.world_ego_points[nn_idx, 1]) + self.prior_network.world_ego_points[nn_idx, 2]
-                # prior_z = prior_z / 9
-                # prior_z = prior_z.unsqueeze(-1).detach()
-                
-                prior_z = self.prior_network[cluster_idx](inputs[:, :2]).detach()
+            if not normal:
+                with torch.no_grad():
+                                    
+                    
+                    ### use ground truth prior
+                    # world_xy = inputs[:, :2] * 500
+                    # nn_idx = nn_2d(self.prior_network.world_ego_points[:, :2], world_xy)
+                    # prior_z = -self.prior_network.world_coff_A[nn_idx] * (world_xy[:, 0] - self.prior_network.world_ego_points[nn_idx, 0]) - self.prior_network.world_coff_B[nn_idx] * (world_xy[:, 1] - self.prior_network.world_ego_points[nn_idx, 1]) + self.prior_network.world_ego_points[nn_idx, 2]
+                    # prior_z = prior_z / 9
+                    # prior_z = prior_z.unsqueeze(-1).detach()
+                    
+                    prior_z = self.prior_network[cluster_idx](inputs[:, :2]).detach()
+            else:
+                prior_z = self.prior_network[cluster_idx](inputs[:, :2])
         z_vals = inputs[:, 2:]
         inputs = inputs * self.scale
         # if self.embed_fn_fine is not None:
@@ -669,6 +671,8 @@ class SDFNetwork_2d_hash(nn.Module):
             if not delta:
                 return torch.cat([x[:, :1] / self.scale, x[:, 1:]], dim=-1)
             else:
+                if normal:
+                    return torch.cat([z_vals - x[:, :1] / self.scale - prior_z, x[:, 1:]], dim=-1)
                 if gradient:
                     return torch.cat([z_vals - x[:, :1] / self.scale, x[:, 1:]], dim=-1)
                 if output_height:
@@ -712,7 +716,18 @@ class SDFNetwork_2d_hash(nn.Module):
             retain_graph=True,
             only_inputs=True)[0]
         return gradients.unsqueeze(1)
-    
+    def normal(self, x):
+        x.requires_grad_(True)
+        y = self.forward(x, gradient=True, normal=True)[:, :1]
+        d_output = torch.ones_like(y, requires_grad=False, device=y.device)
+        gradients = torch.autograd.grad(
+            outputs=y,
+            inputs=x,
+            grad_outputs=d_output,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True)[0]
+        return gradients.unsqueeze(1)
     
     
     

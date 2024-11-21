@@ -16,7 +16,6 @@ from utils.visualization import (
     to8b,
     depth_visualizer,
 )
-from torcheval.metrics.image import FrechetInceptionDistance
 
 logger = logging.getLogger()
 
@@ -73,7 +72,6 @@ def render_images(
         logger.info(f"\t Full Image  PSNR: {render_results['psnr']:.4f}")
         logger.info(f"\t Full Image  SSIM: {render_results['ssim']:.4f}")
         logger.info(f"\t Full Image LPIPS: {render_results['lpips']:.4f}")
-        logger.info(f"\t              FID: {render_results['fid']:.4f}")
         logger.info(f"\t     Non-Sky PSNR: {render_results['occupied_psnr']:.4f}")
         logger.info(f"\t     Non-Sky SSIM: {render_results['occupied_ssim']:.4f}")
         logger.info(f"\tDynamic-Only PSNR: {render_results['masked_psnr']:.4f}")
@@ -109,7 +107,7 @@ def render(
     error_maps = []
 
     # depths
-    depths, lidar_on_images = [], []
+    depths, lidar_on_images, normals = [], [], []
     Background_depths, RigidNodes_depths, DeformableNodes_depths, SMPLNodes_depths, Dynamic_depths = [], [], [], [], []
 
     # sky
@@ -125,18 +123,13 @@ def render(
         human_psnrs, human_ssims = [], []
         vehicle_psnrs, vehicle_ssims = [], []
         occupied_psnrs, occupied_ssims = [], []
-        fid = FrechetInceptionDistance(device=trainer.device)
-        
 
     # with torch.no_grad():
     indices = vis_indices if vis_indices is not None else range(len(dataset))
     camera_downscale = trainer._get_downscale_factor()
     for i in tqdm(indices, desc=f"rendering {dataset.split}", dynamic_ncols=True):
         # get image and camera infos
-        # import ipdb ; ipdb.set_trace()  # 只保留image_00
         image_infos, cam_infos = dataset.get_image(i, camera_downscale)
-        if cam_infos['cam_id'].flatten()[0].item() >= 1:
-            continue
         for k, v in image_infos.items():
             if isinstance(v, Tensor):
                 image_infos[k] = v.cuda(non_blocking=True)
@@ -158,7 +151,12 @@ def render(
         )
 
         # ------------- rgb ------------- #
-        rgb = results["rgb"]
+        if 'rgb_final' in results:
+            rgb = results["rgb_final"]
+        else:
+            rgb = results["rgb"]
+        # import ipdb; ipdb.set_trace()
+        # rgb[image_infos['egocar_masks']>0] = 0
         rgbs.append(get_numpy(rgb))
         if "pixels" in image_infos:
             gt_rgbs.append(get_numpy(image_infos["pixels"]))
@@ -236,8 +234,6 @@ def render(
             lidar_on_images.append(lidar_on_image)
 
         if compute_metrics:
-            fid.update(images=rgb[None, ...].permute(0, 3, 1, 2), is_real=False)
-            fid.update(images=image_infos["pixels"][None, ...].permute(0, 3, 1, 2), is_real=True)
             psnr = compute_psnr(rgb, image_infos["pixels"])
             ssim_score = ssim(
                 get_numpy(rgb),
@@ -331,7 +327,6 @@ def render(
     results_dict["psnr"] = non_zero_mean(psnrs) if compute_metrics else -1
     results_dict["ssim"] = non_zero_mean(ssim_scores) if compute_metrics else -1
     results_dict["lpips"] = non_zero_mean(lpipss) if compute_metrics else -1
-    results_dict["fid"] = fid.compute().item() if compute_metrics else -1
     results_dict["occupied_psnr"] = non_zero_mean(occupied_psnrs) if compute_metrics else -1
     results_dict["occupied_ssim"] = non_zero_mean(occupied_ssims) if compute_metrics else -1
     results_dict["masked_psnr"] = non_zero_mean(masked_psnrs) if compute_metrics else -1
@@ -342,6 +337,7 @@ def render(
     results_dict["vehicle_ssim"] = non_zero_mean(vehicle_ssims) if compute_metrics else -1
     results_dict["rgbs"] = rgbs
     results_dict["depths"] = depths
+    results_dict["normals"] = normals
     results_dict["cam_names"] = cam_names
     results_dict["cam_ids"] = cam_ids
     if len(opacities) > 0:
@@ -402,7 +398,6 @@ def save_videos(
     save_images: bool = False,
     fps: int = 10,
     verbose: bool = True,
-    **kwargs
 ):  
     if save_seperate_video:
         return_frame = save_seperate_videos(
@@ -411,11 +406,10 @@ def save_videos(
             layout,
             num_timestamps=num_timestamps,
             keys=keys,
-            num_cams=1,
+            num_cams=num_cams,
             save_images=save_images,
             fps=fps,
             verbose=verbose,
-            **kwargs
         )
     else:
         return_frame = save_concatenated_videos(
@@ -445,7 +439,9 @@ def render_novel_views(trainer, render_data: list, save_path: str, fps: int = 30
     trainer.set_eval()  
     
     writer = imageio.get_writer(save_path, mode='I', fps=fps)
-    all_frame_data = []
+    frames = []
+    
+    # with torch.no_grad():
     for frame_data in render_data:
         # Move data to GPU
         for key, value in frame_data["cam_infos"].items():
@@ -468,11 +464,10 @@ def render_novel_views(trainer, render_data: list, save_path: str, fps: int = 30
         # Convert to uint8 and write to video
         rgb_uint8 = (rgb * 255).astype(np.uint8)
         writer.append_data(rgb_uint8)
-        all_frame_data.append(rgb_uint8)
-    
+        frames.append(rgb_uint8)    
     writer.close()
     print(f"Video saved to {save_path}")
-    return frame_data
+    return frames
 
 
 def save_concatenated_videos(
@@ -514,6 +509,7 @@ def save_concatenated_videos(
                     np.stack([frame, frame, frame], axis=-1) for frame in frames
                 ]
             elif "depth" in key:
+                import ipdb; ipdb.set_trace()
                 try:
                     opacities = render_results[key.replace("depths", "opacities")][
                         i * num_cams : (i + 1) * num_cams
@@ -553,7 +549,6 @@ def save_seperate_videos(
     fps: int = 10,
     verbose: bool = False,
     save_images: bool = False,
-    **kwargs
 ):
     return_frame_id = num_timestamps // 2
     return_frame_dict = {}
@@ -602,17 +597,23 @@ def save_seperate_videos(
                     depth_visualizer(frame, opacity)
                     for frame, opacity in zip(frames, opacities)
                 ]
+            # elif "normal" in key:
+       
+            #     opacities = render_results[key.replace("normals", "opacities")][
+            #             i * num_cams : (i + 1) * num_cams
+            #         ]
+               
+            #     frames = [
+            #         depth_visualizer(frame, opacity)
+            #         for frame, opacity in zip(frames, opacities)
+            #     ]
             tiled_img = layout(frames, cam_names)
-            dataset = kwargs.get("dataset", None)
             if save_images:
                 if i == 0:
                     os.makedirs(tmp_save_pth.replace(".mp4", ""), exist_ok=True)
                 for j, frame in enumerate(frames):
-                    if j != 0:
-                        continue
-                    frame_idx = dataset.ts2frame[dataset.test_timesteps[i]]
                     imageio.imwrite(
-                        tmp_save_pth.replace(".mp4", f"/{8:0>4}_{frame_idx:0>10}.png"),
+                        tmp_save_pth.replace(".mp4", f"/{i:03d}_{j:03d}.png"),
                         to8b(frame),
                     )
             # frames = to8b(np.concatenate(frames, axis=1))

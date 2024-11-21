@@ -42,7 +42,6 @@ semantic_classes = [
 dataset_classes_in_sematic = {
     'Vehicle': [13, 14, 15],   # 'car', 'truck', 'bus'
     'human': [11, 12, 17, 18], # 'person', 'rider', 'motorcycle', 'bicycle'
-    'road': [0], # road, sidewalk 
 }
 
 if __name__ == "__main__":
@@ -139,9 +138,6 @@ if __name__ == "__main__":
             vehicle_mask_dir = os.path.join(args.data_root, scene_id, "fine_dynamic_masks", "vehicle")
             if not os.path.exists(vehicle_mask_dir):
                 os.makedirs(vehicle_mask_dir)
-            road_mask_dir = os.path.join(args.data_root, scene_id, "fine_dynamic_masks", "road")
-            if not os.path.exists(road_mask_dir):
-                os.makedirs(road_mask_dir)
         
         flist = sorted(glob(os.path.join(img_dir, '*')))
         for fpath in tqdm(flist, f'scene[{scene_id}]'):
@@ -169,26 +165,19 @@ if __name__ == "__main__":
             
             if args.process_dynamic_mask:
                 # save human masks
-                # rough_human_mask_path = os.path.join(rough_human_mask_dir, f"{fbase}.png")
-                # rough_human_mask = (imageio.imread(rough_human_mask_path) > 0)
+                rough_human_mask_path = os.path.join(rough_human_mask_dir, f"{fbase}.png")
+                rough_human_mask = (imageio.imread(rough_human_mask_path) > 0)
                 huamn_mask = np.isin(mask, dataset_classes_in_sematic['human'])
-                valid_human_mask = huamn_mask
+                valid_human_mask = np.logical_and(huamn_mask, rough_human_mask)
                 imageio.imwrite(os.path.join(human_mask_dir, f"{fbase}.png"), valid_human_mask.astype(np.uint8)*255)
                 
                 # save vehicle mask
-                # rough_vehicle_mask_path = os.path.join(rough_vehicle_mask_dir, f"{fbase}.png")
-                # rough_vehicle_mask = (imageio.imread(rough_vehicle_mask_path) > 0)
+                rough_vehicle_mask_path = os.path.join(rough_vehicle_mask_dir, f"{fbase}.png")
+                rough_vehicle_mask = (imageio.imread(rough_vehicle_mask_path) > 0)
                 vehicle_mask = np.isin(mask, dataset_classes_in_sematic['Vehicle'])
-                valid_vehicle_mask = vehicle_mask
+                valid_vehicle_mask = np.logical_and(vehicle_mask, rough_vehicle_mask)
                 imageio.imwrite(os.path.join(vehicle_mask_dir, f"{fbase}.png"), valid_vehicle_mask.astype(np.uint8)*255)
                 
                 # save dynamic mask
                 valid_all_mask = np.logical_or(valid_human_mask, valid_vehicle_mask)
                 imageio.imwrite(os.path.join(all_mask_dir, f"{fbase}.png"), valid_all_mask.astype(np.uint8)*255)
-                
-                # save road mask
-                # rough_road_mask_path = os.path.join(rough_road_mask_dir, f"{fbase}.png")
-                # rough_road_mask = (imageio.imread(rough_road_mask_path) > 0)
-                road_mask = np.isin(mask, dataset_classes_in_sematic['road'])
-                valid_road_mask = road_mask
-                imageio.imwrite(os.path.join(road_mask_dir, f"{fbase}.png"), valid_road_mask.astype(np.uint8)*255)

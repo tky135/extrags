@@ -234,35 +234,37 @@ class NeuSRenderer:
         
         # 计算depth
         dirs = rays_d[:, None, :].expand(pts.shape)
-        # origs = rays_o[:, None, :].expand(pts.shape)
+        origs = rays_o[:, None, :].expand(pts.shape)
         pts = pts.reshape(-1, 3)
         dirs = dirs.reshape(-1, 3)
-        # origs = origs.reshape(-1, 3)
-        # depth = torch.linalg.norm((pts - origs)[:, :2], ord=2, dim=-1).reshape(batch_size, n_samples)
+        origs = origs.reshape(-1, 3)
+        depth = torch.linalg.norm((pts - origs)[:, :2], ord=2, dim=-1).reshape(batch_size, n_samples)
 
 
         sdf_nn_output = sdf_network(pts)
         sdf = sdf_nn_output[:, :1]
 
-        # abs_sdf = torch.abs(sdf).reshape(batch_size, n_samples)
-        # min_abs_sdf_idx = torch.argmin(abs_sdf, dim=-1)
-        # depth = depth[torch.arange(batch_size), min_abs_sdf_idx]
+        abs_sdf = torch.abs(sdf).reshape(batch_size, n_samples)
+        min_abs_sdf_idx = torch.argmin(abs_sdf, dim=-1)
+        depth = depth[torch.arange(batch_size), min_abs_sdf_idx]
         
         
         feature_vector = sdf_nn_output[:, 1:]
 
         # TODO: 不要算两次
-        # delta = sdf_network(pts, delta=False)[:, 0]
-        # delta_loss = torch.mean(delta ** 2)
-
+        delta = sdf_network(pts, delta=False)[:, 0]
+        delta_loss = torch.mean(delta ** 2)
+        
+        # print('xxxxxxx pts.requires_grad:', pts.requires_grad)
+        # breakpoint()
         gradients = sdf_network.gradient(pts).squeeze()
         # sampled_color, sampled_delta_color, sampled_beta = color_network(pts, gradients, dirs, feature_vector, camera_encod, is_test=is_test)
         color_output_dict = color_network(feature_vector, pts, gradients, dirs, camera_encod)
         sampled_color, sampled_delta_color, sampled_beta, sampled_orig_color = color_output_dict["rgb"], color_output_dict["delta"], color_output_dict["beta"], color_output_dict["rgb_orig"]
         sampled_color = sampled_color.reshape(batch_size, n_samples, 3)
         sampled_orig_color = sampled_orig_color.reshape(batch_size, n_samples, 3)
-        # sampled_label = label_network(pts[:, :2], feature_vector).reshape(batch_size, n_samples, 5)
-        # sampled_beta = sampled_beta.reshape(batch_size, n_samples, 1)
+        sampled_label = label_network(pts[:, :2], feature_vector).reshape(batch_size, n_samples, 5)
+        sampled_beta = sampled_beta.reshape(batch_size, n_samples, 1)
         
 
         inv_s = deviation_network(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6)           # Single parameter
@@ -304,8 +306,8 @@ class NeuSRenderer:
 
         color = (sampled_color * weights[:, :, None]).sum(dim=1)
         orig_color = (sampled_orig_color * weights[:, :, None]).sum(dim=1)
-        # seg_label = (sampled_label * weights[:, :, None]).sum(dim=1)
-        # beta = (sampled_beta * weights[:, :, None]).sum(dim=1)
+        seg_label = (sampled_label * weights[:, :, None]).sum(dim=1)
+        beta = (sampled_beta * weights[:, :, None]).sum(dim=1)
         if background_rgb is not None:    # Fixed background, usually black
             color = color + background_rgb * (1.0 - weights_sum)
 
@@ -326,25 +328,20 @@ class NeuSRenderer:
             'cdf': c.reshape(batch_size, n_samples),
             'gradient_error': gradient_error,
             'inside_sphere': inside_sphere, 
-            # 'label': seg_label,
-            # 'delta_loss': delta_loss, 
-            # 'depth': depth, 
+            'label': seg_label,
+            'delta_loss': delta_loss, 
+            'depth': depth, 
             'delta_color': sampled_delta_color, 
-            # 'beta': beta
+            'beta': beta
         }
 
-    def render(self, rays_o, rays_d, near, far, perturb_overwrite=-1, background_rgb=None, cos_anneal_ratio=0.0, camera_encod=None, is_test=False, **kwargs):
-        # overwrite configuration when testing
-        n_importance_ = self.n_importance if "n_importance" not in kwargs else kwargs["n_importance"]
-        n_samples_ = self.n_samples if "n_samples" not in kwargs else kwargs["n_samples"]
-        up_sample_steps_ = self.up_sample_steps if "up_sample_steps" not in kwargs else kwargs["up_sample_steps"]
-        
+    def render(self, rays_o, rays_d, near, far, perturb_overwrite=-1, background_rgb=None, cos_anneal_ratio=0.0, camera_encod=None, is_test=False):
         batch_size = len(rays_o)
-        sample_dist = 1.0 / n_samples_   #TODO??? 2.0 -> 1.0
-        z_vals = torch.linspace(0.0, 1.0, n_samples_, device=rays_o.device)
+        sample_dist = 1.0 / self.n_samples   #TODO??? 2.0 -> 1.0
+        z_vals = torch.linspace(0.0, 1.0, self.n_samples, device=rays_o.device)
         z_vals = near + (far - near) * z_vals[None, :]  # 初始z_vals 是在near和far之间的均匀采样点
 
-        n_samples = n_samples_
+        n_samples = self.n_samples
         perturb = self.perturb
 
         if perturb_overwrite >= 0:
@@ -355,41 +352,40 @@ class NeuSRenderer:
 
         background_alpha = None
         background_sampled_color = None
-        
 
         # Up sample, 原始的均匀z_vals被干掉
-        if n_importance_ > 0:
+        if self.n_importance > 0:
             with torch.no_grad():
                 pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]    # [batch_size, n_samples, 3]
-                sdf = self.sdf_network.sdf(pts.reshape(-1, 3)).reshape(batch_size, n_samples_)
+                sdf = self.sdf_network.sdf(pts.reshape(-1, 3)).reshape(batch_size, self.n_samples)
 
                 new_z_vals = self.up_sample(rays_o,
                                                 rays_d,
                                                 z_vals,
                                                 sdf,
-                                                n_importance_ // up_sample_steps_,
+                                                self.n_importance // self.up_sample_steps,
                                                 64 * 2**0) # 越来越小的variance
                 new_z_vals, index = torch.sort(new_z_vals, dim=-1)
                 
                 z_vals = new_z_vals
                 pts = rays_o[:, None, :] + rays_d[:, None, :] * new_z_vals[..., :, None]
-                sdf = self.sdf_network.sdf(pts.reshape(-1, 3)).reshape(batch_size, n_importance_ // up_sample_steps_)
+                sdf = self.sdf_network.sdf(pts.reshape(-1, 3)).reshape(batch_size, self.n_importance // self.up_sample_steps)
 
-                for i in range(1, up_sample_steps_):
+                for i in range(1, self.up_sample_steps):
                     new_z_vals = self.up_sample(rays_o,
                                                 rays_d,
                                                 z_vals,
                                                 sdf,
-                                                n_importance_ // up_sample_steps_,
+                                                self.n_importance // self.up_sample_steps,
                                                 64 * 2**i) # 越来越小的variance
                     z_vals, sdf = self.cat_z_vals(rays_o,
                                                   rays_d,
                                                   z_vals,
                                                   new_z_vals,
                                                   sdf,
-                                                  last=(i + 1 == up_sample_steps_))
+                                                  last=(i + 1 == self.up_sample_steps))
 
-            n_samples = n_importance_
+            n_samples = self.n_importance
 
 
 
@@ -410,7 +406,7 @@ class NeuSRenderer:
                                     is_test=is_test)
 
         color_fine = ret_fine['color']
-        # labels = ret_fine['label']
+        labels = ret_fine['label']
         weights = ret_fine['weights']
         weights_sum = weights.sum(dim=-1, keepdim=True)
         gradients = ret_fine['gradients']
@@ -427,11 +423,11 @@ class NeuSRenderer:
             'weights': weights,
             'gradient_error': ret_fine['gradient_error'],
             'inside_sphere': ret_fine['inside_sphere'], 
-            # 'label': labels,
-            # 'delta_loss': ret_fine['delta_loss'],
-            # 'depth': ret_fine['depth'], 
+            'label': labels,
+            'delta_loss': ret_fine['delta_loss'],
+            'depth': ret_fine['depth'], 
             'delta_color': ret_fine['delta_color'],
-            # 'beta': ret_fine['beta']
+            'beta': ret_fine['beta']
         }
 
     def extract_color(self, pts, cameras=None, **kwargs):

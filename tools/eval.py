@@ -8,9 +8,8 @@ import logging
 import argparse
 
 import torch
-from datasets.driving_dataset import DrivingDataset
+from datasets.multibag_driving_dataset import MultiBagDrivingDataset as DrivingDataset
 from utils.misc import import_str
-from utils.logging import setup_logging
 from models.trainers import BasicTrainer
 from models.video_utils import (
     render_images,
@@ -30,10 +29,13 @@ def do_evaluation(
     args: argparse.Namespace = None,
     render_keys: Optional[List[str]] = None,
     post_fix: str = "",
-    log_metrics: bool = True
+    log_metrics: bool = True,
+    is_train: bool = False
 ):
-    trainer.set_eval()
 
+    trainer.set_eval()
+    if is_train:
+        trainer.training = True
     logger.info("Evaluating Pixels...")
     if dataset.test_image_set is not None and cfg.render.render_test:
         logger.info("Evaluating Test Set Pixels...")
@@ -51,7 +53,6 @@ def do_evaluation(
                     "psnr",
                     "ssim",
                     "lpips",
-                    "fid",
                     "occupied_psnr",
                     "occupied_ssim",
                     "masked_psnr",
@@ -81,12 +82,11 @@ def do_evaluation(
             layout=dataset.layout,
             num_timestamps=dataset.num_test_timesteps,
             keys=render_keys,
-            num_cams=dataset.pixel_source.num_cams,
-            save_seperate_video=cfg.logging.save_seperate_video,
+            num_cams=dataset.pixel_source.num_cams_per_bag,
+            save_seperate_video=True, #cfg.logging.save_seperate_video,
             fps=2,
             verbose=True,
             save_images=True,
-            dataset=dataset
         )
         if args.enable_wandb:
             for k, v in vis_frame_dict.items():
@@ -98,7 +98,7 @@ def do_evaluation(
         logger.info("Evaluating Full Set...")
         render_results = render_images(
             trainer=trainer,
-            dataset=dataset.train_image_set,
+            dataset=dataset.full_image_set,
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
         )
@@ -106,12 +106,10 @@ def do_evaluation(
         if log_metrics:
             eval_dict = {}
             for k, v in render_results.items():
-                
                 if k in [
                     "psnr",
                     "ssim",
                     "lpips",
-                    "fid",
                     "occupied_psnr",
                     "occupied_ssim",
                     "masked_psnr",
@@ -139,9 +137,9 @@ def do_evaluation(
             render_results,
             video_output_pth,
             layout=dataset.layout,
-            num_timestamps=dataset.num_train_timesteps,
+            num_timestamps=dataset.num_img_timesteps,
             keys=render_keys,
-            num_cams=dataset.pixel_source.num_cams,
+            num_cams=dataset.pixel_source.num_cams_per_bag,
             save_seperate_video=cfg.logging.save_seperate_video,
             fps=cfg.render.fps,
             verbose=True,
@@ -184,26 +182,32 @@ def do_evaluation(
         import numpy as np
         import imageio
         render_results = []
+        counter = 0
         for traj_type, traj in render_traj.items():
             # Prepare rendering data
-            render_data = dataset.prepare_novel_view_render_data(traj)
-            
+            render_data = dataset.prepare_novel_view_render_data(traj, counter)
+            counter += 1
             # Render and save video
             save_path = os.path.join(video_output_dir, f"{traj_type}.mp4")
             frames = render_novel_views(
                 trainer, render_data, save_path,
-                fps=render_novel_cfg.get("fps", cfg.render.fps)
+                fps=cfg.render.fps
             )
             render_results.append(frames)
             logger.info(f"Saved novel view video for trajectory type: {traj_type} to {save_path}")
-        writer = imageio.get_writer(os.path.join(video_output_dir, "novel_merged.mp4"), mode="I", fps=render_novel_cfg.get("fps", cfg.render.fps))
+        writer = imageio.get_writer(os.path.join(video_output_dir, "novel_merged.mp4"), mode="I", fps=cfg.render.fps)
         all_frames = np.asarray(render_results)
         all_frames_ts = []
         for i in range(all_frames.shape[1]):
             all_frames_ts.append(all_frames[:, i, ...])
         for frame in all_frames_ts:
             frame_list = [f for f in frame]
-            frame_np = np.concatenate(frame_list, axis=1)
+            # frame_np = np.concatenate(frame_list, axis=1)
+            top_np = np.concatenate((np.zeros_like(frame_list[0]), frame_list[0], np.zeros_like(frame_list[0])), axis=1)
+            H_mid = frame_list[2].shape[0]
+            mid_np = np.concatenate((frame_list[2], frame_list[1][:H_mid], frame_list[3]), axis=1)
+            bot_np = np.concatenate((frame_list[4], frame_list[6], frame_list[5]), axis=1)
+            frame_np = np.concatenate((top_np, mid_np, bot_np), axis=0)
             writer.append_data(frame_np)
         writer.close()
 def main(args):
@@ -214,16 +218,11 @@ def main(args):
     for folder in ["videos_eval", "metrics_eval"]:
         os.makedirs(os.path.join(log_dir, folder), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # setup logging
-    global logger
-    setup_logging(output=log_dir, level=logging.INFO, time_string=current_time)
 
     # build dataset
     dataset = DrivingDataset(data_cfg=cfg.data)
 
     # setup trainer
-    cfg.trainer.dataset = cfg.data.dataset
     trainer = import_str(cfg.trainer.type)(
         **cfg.trainer,
         num_timesteps=dataset.num_img_timesteps,
@@ -235,6 +234,8 @@ def main(args):
         device=device
     )
     
+    trainer.init_gaussians_from_dataset(dataset=dataset)
+    trainer.neus23dgs()
     # Resume from checkpoint
     trainer.resume_from_checkpoint(
         ckpt_path=args.resume_from,
@@ -253,11 +254,11 @@ def main(args):
         "gt_rgbs",
         "rgbs",
         "Background_rgbs",
-        "RigidNodes_rgbs",
-        "DeformableNodes_rgbs",
-        "SMPLNodes_rgbs",
+        # "RigidNodes_rgbs",
+        # "DeformableNodes_rgbs",
+        # "SMPLNodes_rgbs",
         "depths",
-        "Background_depths",
+        # "Background_depths",
         # "RigidNodes_depths",
         # "DeformableNodes_depths",
         # "SMPLNodes_depths",

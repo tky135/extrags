@@ -1,6 +1,9 @@
 /data/
-*.pcd
+/*.pcd
 /out/
 __pycache__/
 /wandb/
 /*.sh
+/output/
+/.output_results/
+/*.png

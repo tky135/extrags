@@ -472,6 +472,7 @@ class WaymoLiDARSource(SceneLidarSource):
         self.ranges = torch.cat(ranges, dim=0)
         self.laser_ids = torch.cat(laser_ids, dim=0)
         self.visible_masks = torch.zeros_like(self.ranges).squeeze().bool()
+        self.road_masks = torch.zeros_like(self.ranges).squeeze().bool()
         self.colors = torch.ones_like(self.directions)
         # becasue the flows here are velocities (m/s), and the fps of the lidar is 10,
         # we need to divide the velocities by 10 to get the displacements/flows
@@ -511,11 +512,25 @@ class WaymoLiDARSource(SceneLidarSource):
             "lidar_mask": self.timesteps == time_idx,
             "lidar_flows": flows,
         }
-
+    def get_road_lidarpoints(self):
+        return self.road_point_neus
     def delete_invisible_pts(self) -> None:
         """
         Clear the unvisible points.
         """
+        if self.road_masks is not None:
+            road_origins = self.origins[self.road_masks]
+            road_directions = self.directions[self.road_masks]
+            road_ranges = self.ranges[self.road_masks]
+            
+            lidar_points = road_origins + road_directions * road_ranges
+            self.road_point_neus = lidar_points
+            # import open3d as o3d
+            # pc = o3d.geometry.PointCloud()
+            # pc.points = o3d.utility.Vector3dVector(lidar_points.cpu().numpy())
+            # o3d.io.write_point_cloud("lidar_points_road.pcd", pc)
+            self.road_masks = None
+        
         if self.visible_masks is not None:
             num_bf = self.origins.shape[0]
             self.origins = self.origins[self.visible_masks]

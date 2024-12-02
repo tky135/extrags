@@ -49,7 +49,8 @@ def render_images(
     dataset: SplitWrapper,
     compute_metrics: bool = False,
     compute_error_map: bool = False,
-    vis_indices: Optional[List[int]] = None
+    vis_indices: Optional[List[int]] = None,
+    lane_shift: bool = False,
 ):
     """
     Render pixel-related outputs from a model.
@@ -65,7 +66,8 @@ def render_images(
         trainer=trainer,
         compute_metrics=compute_metrics,
         compute_error_map=compute_error_map,
-        vis_indices=vis_indices
+        vis_indices=vis_indices,
+        lane_shift=lane_shift,
     )
     if compute_metrics:
         num_samples = len(dataset) if vis_indices is None else len(vis_indices)
@@ -92,6 +94,7 @@ def render(
     compute_metrics: bool = False,
     compute_error_map: bool = False,
     vis_indices: Optional[List[int]] = None,
+    lane_shift: bool = False,
 ):
     """
     Renders a dataset utilizing a specified render function.
@@ -134,8 +137,8 @@ def render(
     for i in tqdm(indices, desc=f"rendering {dataset.split}", dynamic_ncols=True):
         # get image and camera infos
         # import ipdb ; ipdb.set_trace()  # 只保留image_00
-        image_infos, cam_infos = dataset.get_image(i, camera_downscale)
-        if cam_infos['cam_id'].flatten()[0].item() >= 1:
+        image_infos, cam_infos = dataset.get_image(i, camera_downscale, lane_shift=lane_shift)
+        if os.environ.get("DATASET") == 'kitti360/4cams' and cam_infos['cam_id'].flatten()[0].item() >= 1:
             continue
         for k, v in image_infos.items():
             if isinstance(v, Tensor):
@@ -160,6 +163,10 @@ def render(
         # ------------- rgb ------------- #
         rgb = results["rgb"]
         rgbs.append(get_numpy(rgb))
+        
+        # if not os.path.exists(".output_results"):
+        #     os.makedirs(".output_results")
+        # imageio.imwrite(f".output_results/{i:03d}.png", to8b(get_numpy(rgb)))
         if "pixels" in image_infos:
             gt_rgbs.append(get_numpy(image_infos["pixels"]))
             
@@ -203,7 +210,7 @@ def render(
         if "rgb_sky" in results:
             rgb_sky.append(get_numpy(results["rgb_sky"]))
         # ------------- depth ------------- #
-        depth = results["depth"]
+        depth = results['3dgs']["depth"]
         depths.append(get_numpy(depth))
         # ------------- mask ------------- #
         if "opacity" in results:
@@ -404,6 +411,8 @@ def save_videos(
     verbose: bool = True,
     **kwargs
 ):  
+    if os.environ.get("DATASET") == 'kitti360/4cams':
+        num_cams = 1
     if save_seperate_video:
         return_frame = save_seperate_videos(
             render_results,
@@ -411,7 +420,7 @@ def save_videos(
             layout,
             num_timestamps=num_timestamps,
             keys=keys,
-            num_cams=1,
+            num_cams=num_cams,
             save_images=save_images,
             fps=fps,
             verbose=verbose,
@@ -446,6 +455,7 @@ def render_novel_views(trainer, render_data: list, save_path: str, fps: int = 30
     
     writer = imageio.get_writer(save_path, mode='I', fps=fps)
     all_frame_data = []
+    fid = FrechetInceptionDistance(device=trainer.device)
     for frame_data in render_data:
         # Move data to GPU
         for key, value in frame_data["cam_infos"].items():
@@ -465,11 +475,17 @@ def render_novel_views(trainer, render_data: list, save_path: str, fps: int = 30
             min=1.e-6, max=1-1.e-6
         )
         
+        fid.update(images=outputs['rgb'].detach().clip(0, 1)[None, ...].permute(0, 3, 1, 2), is_real=False)
+        fid.update(images=frame_data['image_infos']["pixels"][None, ...].permute(0, 3, 1, 2), is_real=True)
+        
+        gt_rgb = frame_data["image_infos"]["pixels"].detach().cpu().numpy()
+        
         # Convert to uint8 and write to video
         rgb_uint8 = (rgb * 255).astype(np.uint8)
-        writer.append_data(rgb_uint8)
+        gt_rgb_uint8 = (gt_rgb * 255).astype(np.uint8)
+        output_data = np.concatenate([rgb_uint8, gt_rgb_uint8], axis=1)
+        writer.append_data(output_data)
         all_frame_data.append(rgb_uint8)
-    
     writer.close()
     print(f"Video saved to {save_path}")
     return frame_data
@@ -608,13 +624,19 @@ def save_seperate_videos(
                 if i == 0:
                     os.makedirs(tmp_save_pth.replace(".mp4", ""), exist_ok=True)
                 for j, frame in enumerate(frames):
-                    if j != 0:
-                        continue
-                    frame_idx = dataset.ts2frame[dataset.test_timesteps[i]]
-                    imageio.imwrite(
-                        tmp_save_pth.replace(".mp4", f"/{8:0>4}_{frame_idx:0>10}.png"),
-                        to8b(frame),
-                    )
+                    if os.environ.get("DATATSET") == 'kitti360/4cams':
+                        if j != 0:
+                            continue
+                        frame_idx = dataset.ts2frame[dataset.test_timesteps[i]]
+                        imageio.imwrite(
+                            tmp_save_pth.replace(".mp4", f"/{8:0>4}_{frame_idx:0>10}.png"),
+                            to8b(frame),
+                        )
+                    else:
+                        imageio.imwrite(
+                            tmp_save_pth.replace(".mp4", f"/{i:03d}_{j:03d}.png"),
+                            to8b(frame),
+                        )
             # frames = to8b(np.concatenate(frames, axis=1))
             frames = to8b(tiled_img)
             writer.append_data(frames)

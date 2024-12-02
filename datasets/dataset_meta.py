@@ -235,4 +235,34 @@ DATASETS_CONFIG = {
             "egocar_visible": False
         },
     },
+    "multibag": {
+        0: {
+            "camera_name": "cameraF30",
+            "egocar_visible": False
+        },
+        1: {
+            "camera_name": "cameraF100",
+            "egocar_visible": True
+        },
+        2: {
+            "camera_name": "cameraLF100",
+            "egocar_visible": False
+        },
+        3: {
+            "camera_name": "cameraRF100",
+            "egocar_visible": False
+        },
+        4: {
+            "camera_name": "cameraLR100",
+            "egocar_visible": False
+        },
+        5: {
+            "camera_name": "cameraRR100",
+            "egocar_visible": False
+        },
+        6: {
+            "camera_name": "cameraR50",
+            "egocar_visible": False
+        },
+    },
 }

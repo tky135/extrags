@@ -9,10 +9,21 @@ from dataclasses import dataclass, fields
 from sklearn.neighbors import NearestNeighbors
 from pytorch3d.transforms import matrix_to_quaternion
 
-from gsplat.rendering import rasterization
-from gsplat.cuda_legacy._wrapper import num_sh_bases
-from gsplat.cuda_legacy._torch_impl import quat_to_rotmat
+from gsplat.rendering import rasterization, rasterization_2dgs, rasterization_2dgs_inria_wrapper,rasterization_inria_wrapper
+from gsplat.utils import normalized_quat_to_rotmat as quat_to_rotmat
 from gsplat.cuda._wrapper import spherical_harmonics
+
+
+def num_sh_bases(degree: int):
+    if degree == 0:
+        return 1
+    if degree == 1:
+        return 4
+    if degree == 2:
+        return 9
+    if degree == 3:
+        return 16
+    return 25
 
 def interpolate_quats(q1, q2, fraction=0.5):
     q1 = q1 / torch.norm(q1, dim=-1, keepdim=True)

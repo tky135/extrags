@@ -98,7 +98,7 @@ def do_evaluation(
         logger.info("Evaluating Full Set...")
         render_results = render_images(
             trainer=trainer,
-            dataset=dataset.train_image_set,
+            dataset=dataset.full_image_set,
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
         )
@@ -139,7 +139,7 @@ def do_evaluation(
             render_results,
             video_output_pth,
             layout=dataset.layout,
-            num_timestamps=dataset.num_train_timesteps,
+            num_timestamps=dataset.num_img_timesteps,
             keys=render_keys,
             num_cams=dataset.pixel_source.num_cams,
             save_seperate_video=cfg.logging.save_seperate_video,
@@ -155,57 +155,63 @@ def do_evaluation(
     render_novel_cfg = cfg.render.get("render_novel", None)
     if render_novel_cfg is not None:
         logger.info("Rendering novel views...")
-        render_traj = dataset.get_novel_render_traj(
-            traj_types=render_novel_cfg.traj_types,
-            target_frames=render_novel_cfg.get("frames", dataset.frame_num),
+        render_results = render_images(
+            trainer=trainer,
+            dataset=dataset.full_image_set,
+            compute_metrics=True,
+            compute_error_map=cfg.render.vis_error,
+            lane_shift=True,
         )
-        video_output_dir = f"{cfg.log_dir}/videos{post_fix}/novel_{step}"
-        if not os.path.exists(video_output_dir):
-            os.makedirs(video_output_dir)
-
-        # import ipdb; ipdb.set_trace()
-        # # get original poses
-        # per_cam_poses = dataset.pixel_source.camera_data[0].cam_to_worlds
         
-        # # change traj
-        # from scipy.spatial.transform import Rotation as R
-        # import numpy as np
-        # key_poses = per_cam_poses # render_traj['front_center_interp']
-        # rotations = key_poses[:, :3, :3]
-        # key_rots = R.from_matrix(rotations)
-        # key_rots_euler = key_rots.as_euler('zxy', degrees=True)
-        # x = (np.arange(151)/150. - 0.5) * 45 + key_rots_euler[:, 1]
-        # new_key_rots_euler = key_rots_euler
-        # new_key_rots_euler[:, 1] = x
-        # new_rotations = R.from_euler('zxy', new_key_rots_euler, degrees=True)
-        # new_rotations = new_rotations.as_matrix()
-        # # render_traj['front_center_interp'][:, :3, :3] = torch.Tensor(new_rotations)
-        # render_traj['front_center_interp'] = per_cam_poses
-        import numpy as np
-        import imageio
-        render_results = []
-        for traj_type, traj in render_traj.items():
-            # Prepare rendering data
-            render_data = dataset.prepare_novel_view_render_data(traj)
-            
-            # Render and save video
-            save_path = os.path.join(video_output_dir, f"{traj_type}.mp4")
-            frames = render_novel_views(
-                trainer, render_data, save_path,
-                fps=render_novel_cfg.get("fps", cfg.render.fps)
+        if log_metrics:
+            eval_dict = {}
+            for k, v in render_results.items():
+                
+                if k in [
+                    "psnr",
+                    "ssim",
+                    "lpips",
+                    "fid",
+                    "occupied_psnr",
+                    "occupied_ssim",
+                    "masked_psnr",
+                    "masked_ssim",
+                    "human_psnr",
+                    "human_ssim",
+                    "vehicle_psnr",
+                    "vehicle_ssim",
+                ]:
+                    eval_dict[f"image_metrics/shift/{k}"] = v
+            if args.enable_wandb:
+                wandb.log(eval_dict)
+            shift_metrics_file = f"{cfg.log_dir}/metrics{post_fix}/images_shift_{current_time}.json"
+            with open(shift_metrics_file, "w") as f:
+                json.dump(eval_dict, f)
+            logger.info(f"Image evaluation metrics saved to {shift_metrics_file}")
+
+        if args.render_video_postfix is None:
+            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/shift_set_{step}.mp4"
+        else:
+            video_output_pth = (
+                f"{cfg.log_dir}/videos{post_fix}/shift_set_{step}_{args.render_video_postfix}.mp4"
             )
-            render_results.append(frames)
-            logger.info(f"Saved novel view video for trajectory type: {traj_type} to {save_path}")
-        writer = imageio.get_writer(os.path.join(video_output_dir, "novel_merged.mp4"), mode="I", fps=render_novel_cfg.get("fps", cfg.render.fps))
-        all_frames = np.asarray(render_results)
-        all_frames_ts = []
-        for i in range(all_frames.shape[1]):
-            all_frames_ts.append(all_frames[:, i, ...])
-        for frame in all_frames_ts:
-            frame_list = [f for f in frame]
-            frame_np = np.concatenate(frame_list, axis=1)
-            writer.append_data(frame_np)
-        writer.close()
+        vis_frame_dict = save_videos(
+            render_results,
+            video_output_pth,
+            layout=dataset.layout,
+            num_timestamps=dataset.num_img_timesteps,
+            keys=render_keys,
+            num_cams=dataset.pixel_source.num_cams,
+            save_seperate_video=cfg.logging.save_seperate_video,
+            fps=cfg.render.fps,
+            verbose=True,
+            save_images=True,
+        )
+        if args.enable_wandb:
+            for k, v in vis_frame_dict.items():
+                wandb.log({"image_rendering/shift/" + k: wandb.Image(v)})
+        del render_results, vis_frame_dict
+        torch.cuda.empty_cache()
 def main(args):
     log_dir = os.path.dirname(args.resume_from)
     cfg = OmegaConf.load(os.path.join(log_dir, "config.yaml"))

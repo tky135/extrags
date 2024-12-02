@@ -71,6 +71,7 @@ def get_interp_novel_trajectories(
         "s_curve": s_curve,
         "three_key_poses": three_key_poses_trajectory,
         "x_shift_left": x_shift_left,
+        "x_shift_right": x_shift_right,
         "y_shift_left": y_shift_left
     }
     
@@ -90,8 +91,16 @@ def x_shift_left(
     dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
 ) -> torch.Tensor:
     assert 0 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
-    same_poses = interpolate_poses(per_cam_poses[0], target_frames)
+    same_poses = per_cam_poses[0].clone()
     same_poses[:, 0, 3] -= 3
+    return same_poses
+
+def x_shift_right(
+    dataset_type: str, per_cam_poses: Dict[int, torch.Tensor], original_frames: int, target_frames: int
+) -> torch.Tensor:
+    assert 0 in per_cam_poses.keys(), "Front center camera (ID 0) is required for same"
+    same_poses = per_cam_poses[0].clone()
+    same_poses[:, 0, 3] += 3
     return same_poses
 
 

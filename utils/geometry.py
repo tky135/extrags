@@ -74,7 +74,7 @@ def uniform_sample_sphere(num_samples, device, inverse=False):
         dist = cube_root(dist)
     else:
         dist = torch.rand((num_samples,)).to(device)
-        dist = 1 / dist.clamp_min(0.02)
+        dist = 1 / dist.clamp_min(1e-5)
     thetas = torch.arccos(2 * torch.rand((num_samples,)) - 1).to(device)
     phis = 2 * torch.pi * torch.rand((num_samples,)).to(device)
     pts = spherical_to_cartesian(dist, thetas, phis)

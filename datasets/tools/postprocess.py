@@ -516,7 +516,7 @@ def match_and_postprocess(
             
             feature_masked = merged_collector[gt_tid]["selected_cam_idx"][final_complete_mask]
             feature_full = interpolate_features(mask, feature_masked)
-            merged_collector[gt_tid]["selected_cam_idx"][final_complete_mask] = feature_full.round()
+            merged_collector[gt_tid]["selected_cam_idx"][final_complete_mask] = feature_full# .round()
         
     # 4. Fill breaks in visibility:
     #    - Detect short gaps in must_appear_mask sequence
@@ -550,7 +550,7 @@ def match_and_postprocess(
             
             feature_masked = merged_collector[gt_tid]["selected_cam_idx"][final_complete_mask]
             feature_full = interpolate_features(mask, feature_masked)
-            merged_collector[gt_tid]["selected_cam_idx"][final_complete_mask] = feature_full.round()
+            merged_collector[gt_tid]["selected_cam_idx"][final_complete_mask] = feature_full# .round()
             
             merged_collector[gt_tid]["must_appear_mask"] = final_complete_mask
     

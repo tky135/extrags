@@ -19,10 +19,12 @@ class SplitWrapper(torch.utils.data.Dataset):
         self.split_indices = split_indices
         self.split = split
 
-    def get_image(self, idx, camera_downscale) -> dict:
+    def get_image(self, idx, camera_downscale, lane_shift: bool = False) -> dict:
         downscale_factor = 1 / camera_downscale * self.datasource.downscale_factor
         self.datasource.update_downscale_factor(downscale_factor)
         image_infos, cam_infos = self.datasource.get_image(self.split_indices[idx])
+        if lane_shift:
+            cam_infos['camera_to_world'][0, 3] -= 3
         self.datasource.reset_downscale_factor()
         return image_infos, cam_infos
 
@@ -41,6 +43,7 @@ class SplitWrapper(torch.utils.data.Dataset):
         return image_infos, cam_infos
     
     def __getitem__(self, idx) -> dict:
+        import ipdb ; ipdb.set_trace()
         return self.get_image(idx, camera_downscale=1.0)
 
     def __len__(self) -> int:

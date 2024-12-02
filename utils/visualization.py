@@ -38,6 +38,8 @@ def get_layout(dataset_type: str):
         layout = layout_mars
     elif dataset_type == "kitti360":
         layout = layout_kitti360
+    elif dataset_type == "multibag":
+        layout = layout_cvg_multibag
     else:
         raise ValueError(f"dataset_type {dataset_type} not supported")
     return layout
@@ -426,6 +428,68 @@ def layout_argoverse(
     min_x, max_x = np.where(filled_mask)[1].min(), np.where(filled_mask)[1].max()
     tiled_img = tiled_img[min_y:max_y, min_x:max_x]
     return tiled_img
+
+def layout_cvg_multibag(
+    imgs: List[np.array], cam_names: List[str]
+) -> np.array:
+    """Combine cameras into a tiled image.
+    Layout:
+
+        ########################
+        #       #  F30 #       # 
+        # LF100 # F100 # RF100 #
+        # LR100 #  R50 # RR100 # 
+        ########################
+    """
+    channel = imgs[0].shape[-1]
+    # front_cam_idx = cam_names.index('cameraF100')
+    # front_img = imgs[front_cam_idx]
+    # landscape_width = front_img.shape[1] #, front_img.shape[0]
+    # landscape_height = 900
+    
+    # import ipdb; ipdb.set_trace()
+
+    landscape_width, landscape_height = 0, 0
+    for img in imgs:
+        height, width = img.shape[:2]
+        landscape_height = max(landscape_height, height)
+        landscape_width = max(landscape_height, width)
+        
+    height = landscape_height * 3
+    width = landscape_width * 3
+    tiled_img = np.zeros((height, width, channel), dtype=np.float32)
+    filled_mask = np.zeros((height, width), dtype=np.uint8)
+    
+    for idx, cam_name in enumerate(cam_names):
+        img = imgs[idx]
+        if cam_name == "cameraF30":
+            tiled_img[landscape_height - img.shape[0] : landscape_height, landscape_width : 2 * landscape_width] = img
+            filled_mask[landscape_height - img.shape[0] : landscape_height, landscape_width : 2 * landscape_width] = 1
+        elif cam_name == "cameraLF100":
+            tiled_img[2 * landscape_height - img.shape[0] : 2 * landscape_height, :landscape_width] = img
+            filled_mask[2 * landscape_height - img.shape[0] : 2 * landscape_height, :landscape_width] = 1
+        elif cam_name == "cameraF100":
+            tiled_img[2 * landscape_height - img.shape[0] : 2 * landscape_height, landscape_width : 2 * landscape_width] = img
+            filled_mask[2 * landscape_height - img.shape[0] : 2 * landscape_height, landscape_width : 2 * landscape_width] = 1
+        elif cam_name == "cameraRF100":
+            tiled_img[2 * landscape_height - img.shape[0] : 2 * landscape_height, 2 * landscape_width : 3 * landscape_width] = img
+            filled_mask[2 * landscape_height - img.shape[0] : 2 * landscape_height, 2 * landscape_width : 3 * landscape_width] = 1
+        elif cam_name == "cameraLR100":
+            tiled_img[3 * landscape_height - img.shape[0] : 3 * landscape_height, :landscape_width] = img
+            filled_mask[3 * landscape_height - img.shape[0] : 3 * landscape_height, :landscape_width] = 1
+        elif cam_name == "cameraR50":
+            tiled_img[3 * landscape_height - img.shape[0] : 3 * landscape_height, landscape_width : 2 * landscape_width] = img
+            filled_mask[3 * landscape_height - img.shape[0] : 3 * landscape_height, landscape_width : 2 * landscape_width] = 1
+        elif cam_name == "cameraRR100":
+            tiled_img[3 * landscape_height - img.shape[0] : 3 * landscape_height, 2 * landscape_width : 3 * landscape_width] = img
+            filled_mask[3 * landscape_height - img.shape[0] : 3 * landscape_height, 2 * landscape_width : 3 * landscape_width] = 1
+    
+    # crop the image according to the lagrest filled area
+    min_y, max_y = np.where(filled_mask)[0].min(), np.where(filled_mask)[0].max()
+    min_x, max_x = np.where(filled_mask)[1].min(), np.where(filled_mask)[1].max()
+    tiled_img = tiled_img[min_y:max_y, min_x:max_x]
+    return tiled_img
+
 
 def dump_3d_bbox_on_image(
     coords, img,

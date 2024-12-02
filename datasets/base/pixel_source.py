@@ -1112,7 +1112,7 @@ class ScenePixelSource(abc.ABC):
         """
         return self.data_cfg.sampler.buffer_downscale
     
-    def prepare_novel_view_render_data(self, dataset_type: str, traj: torch.Tensor) -> list:
+    def prepare_novel_view_render_data(self, dataset_type: str, cam_id: int, traj: torch.Tensor) -> list:
         """
         Prepare all necessary elements for novel view rendering.
 
@@ -1125,10 +1125,10 @@ class ScenePixelSource(abc.ABC):
                 - cam_infos: Camera information (extrinsics, intrinsics, image dimensions)
                 - image_infos: Image-related information (indices, normalized time, viewdirs, etc.)
         """
-        if dataset_type == "argoverse":
-            cam_id = 1  # Use cam_id 1 for Argoverse dataset
-        else:
-            cam_id = 0  # Use cam_id 0 for other datasets
+        # if dataset_type == "argoverse":
+        #     cam_id = 1  # Use cam_id 1 for Argoverse dataset
+        # else:
+        #     cam_id = 0  # Use cam_id 0 for other datasets
         
         intrinsics = self.camera_data[cam_id].intrinsics[0]  # Assume intrinsics are constant across frames
         H, W = self.camera_data[cam_id].HEIGHT, self.camera_data[cam_id].WIDTH
@@ -1155,8 +1155,8 @@ class ScenePixelSource(abc.ABC):
                 "intrinsics": intrinsics,
                 "height": torch.tensor([H], dtype=torch.long, device=self.device),
                 "width": torch.tensor([W], dtype=torch.long, device=self.device),
+                "cam_id": torch.full((H, W), cam_id, dtype=torch.long, device=self.device),
             }
-            
             image_infos = {
                 "origins": origins,
                 "viewdirs": viewdirs,
@@ -1167,6 +1167,7 @@ class ScenePixelSource(abc.ABC):
                 "pixel_coords": torch.stack(
                     [y.float() / H, x.float() / W], dim=-1
                 ),  # [H, W, 2]
+                "pixels": self.camera_data[cam_id].get_image(scaled_indices[i].long().item())[0]['pixels'],
             }
             
             render_data.append({

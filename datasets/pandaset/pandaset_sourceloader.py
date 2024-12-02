@@ -458,6 +458,7 @@ class PandaLiDARSource(SceneLidarSource):
         self.ranges = torch.cat(ranges, dim=0)
         self.laser_ids = torch.cat(laser_ids, dim=0)
         self.visible_masks = torch.zeros_like(self.ranges).squeeze().bool()
+        self.road_masks = torch.zeros_like(self.ranges).squeeze().bool()
         self.colors = torch.ones_like(self.directions)
 
         # the underscore here is important.
@@ -483,11 +484,25 @@ class PandaLiDARSource(SceneLidarSource):
             "lidar_normed_time": normalized_time,
             "lidar_mask": self.timesteps == time_idx,
         }
-
+    def get_road_lidarpoints(self):
+        return self.road_point_neus
     def delete_invisible_pts(self) -> None:
         """
         Clear the unvisible points.
         """
+        if self.road_masks is not None:
+            road_origins = self.origins[self.road_masks]
+            road_directions = self.directions[self.road_masks]
+            road_ranges = self.ranges[self.road_masks]
+            
+            lidar_points = road_origins + road_directions * road_ranges
+            self.road_point_neus = lidar_points
+            # import open3d as o3d
+            # pc = o3d.geometry.PointCloud()
+            # pc.points = o3d.utility.Vector3dVector(lidar_points.cpu().numpy())
+            # o3d.io.write_point_cloud("lidar_points_road.pcd", pc)
+            self.road_masks = None
+        
         if self.visible_masks is not None:
             num_bf = self.origins.shape[0]
             self.origins = self.origins[self.visible_masks]

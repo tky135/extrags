@@ -125,17 +125,13 @@ if __name__ == "__main__":
         scene_ids_list = np.arange(args.start_idx, args.start_idx + args.num_scenes)
     
     for scene_id in scene_ids_list:
-        try:
-            scene_dir = f'{args.data_root}/{str(scene_id).zfill(3)}'
-            extract_humanpose(
-                scene_dir=scene_dir,
-                projection_fn=project_human_boxes,
-                camera_list=CAMERA_LIST,
-                save_temp=args.save_temp,
-                verbose=args.verbose,
-                fps=args.fps
-            )
-            logger.info(f"Finished processing scene {scene_id}")
-        except Exception as e:
-            logger.error(f"Error processing scene {scene_id}: {e}")
-            continue
+        scene_dir = f'{args.data_root}/{str(scene_id).zfill(3)}'
+        extract_humanpose(
+            scene_dir=scene_dir,
+            projection_fn=project_human_boxes,
+            camera_list=CAMERA_LIST,
+            save_temp=args.save_temp,
+            verbose=args.verbose,
+            fps=args.fps
+        )
+        logger.info(f"Finished processing scene {scene_id}")

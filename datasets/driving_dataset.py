@@ -8,7 +8,8 @@ from omegaconf import OmegaConf
 
 import torch
 from torch import Tensor
-
+import json
+import glob
 from models.gaussians.basics import *
 from datasets.base.scene_dataset import ModelType
 from datasets.base.scene_dataset import SceneDataset
@@ -17,7 +18,42 @@ from utils.visualization import get_layout
 from utils.geometry import transform_points
 from utils.camera import get_interp_novel_trajectories
 from utils.misc import export_points_to_ply, import_str
+import torch
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
 
+def visualize_depth_map(depth_tensor, output_path, cmap='viridis', normalize=True):
+    """
+    Visualize a depth map tensor and save it as an RGB image.
+    
+    Args:
+        depth_tensor (torch.Tensor): Depth map tensor of shape [H, W]
+        output_path (str): Path to save the output image
+        cmap (str): Matplotlib colormap to use (default: 'viridis')
+        normalize (bool): Whether to normalize the depth values to [0, 1]
+    """
+    # Ensure the tensor is on CPU and convert to numpy
+    depth_np = depth_tensor.cpu().detach().numpy()
+    
+    # Normalize if requested
+    if normalize:
+        depth_np = depth_np - depth_np.min()
+        max_val = depth_np.max()
+        if max_val != 0:
+            depth_np = depth_np / max_val
+    
+    # Create figure without axes and margins
+    plt.figure(frameon=False)
+    plt.axis('off')
+    
+    # Create the visualization
+    plt.imshow(depth_np, cmap=cmap)
+    
+    # Save the visualization
+    output_path = Path(output_path)
+    plt.savefig(output_path, bbox_inches='tight', pad_inches=0, dpi=300)
+    plt.close()
 logger = logging.getLogger()
 
 DEBUG_PCD=False
@@ -46,30 +82,51 @@ class DrivingDataset(SceneDataset):
         #   PandaSet: 6 Cameras
         #   NuPlan:   8 Cameras
         self.type = self.data_cfg.dataset   # 'nuscenes'
-        try: # For Waymo, NuScenes, ArgoVerse, PandaSet
+        if self.type in ['pandaset', 'kitti360']: # For Waymo, NuScenes, ArgoVerse, PandaSet
             self.data_path = os.path.join(
                 self.data_cfg.data_root,    # 'data/nuscenes/processed_10Hz/mini'
                 f"{int(self.scene_idx):03d}"
             )
-        except: # For KITTI, NuPlan
+        elif self.type in ['multibag']: # For KITTI, NuPlan
             self.data_path = os.path.join(self.data_cfg.data_root, self.scene_idx)
-            
+        else:
+            raise Exception(f"Dataset {self.type} not supported")
         assert os.path.exists(self.data_path), f"{self.data_path} does not exist"
-        if os.path.exists(os.path.join(self.data_path, "ego_pose")):
-            total_frames = len(os.listdir(os.path.join(self.data_path, "ego_pose")))
-        elif os.path.exists(os.path.join(self.data_path, "lidar_pose")):
-            total_frames = len(os.listdir(os.path.join(self.data_path, "lidar_pose")))
-        else:
-            raise ValueError("Unable to determine the total number of frames. Neither 'ego_pose' nor 'lidar_pose' directories found.")
 
-        # ---- find the number of synchronized frames ---- #
-        if self.data_cfg.end_timestep == -1:
-            end_timestep = total_frames - 1
+        # get start and end timesteps (scene_paths for multibag)
+        if self.type in ['multibag']:
+            # get the number of bags
+            self.task_path = os.path.join(self.data_path, "task.json")
+            if os.path.exists(self.task_path):
+                with open(self.task_path, 'r') as f:
+                    self.task_info = json.load(f)
+                
+                packagename_list = self.task_info["package_list"]
+                self.scene_path = [os.path.join(self.data_path, pkg_name) for pkg_name in packagename_list]
+            else:
+                self.scene_path = glob.glob(os.path.join(self.data_path, "ddld*"))
+
+            if self.data_cfg.end_timestep == -1:
+                self.end_timestep = 300
+            else:
+                self.end_timestep = self.data_cfg.end_timestep + 1
+            self.start_timestep = self.data_cfg.start_timestep
         else:
-            end_timestep = self.data_cfg.end_timestep
-        # to make sure the last timestep is included
-        self.end_timestep = end_timestep + 1
-        self.start_timestep = self.data_cfg.start_timestep
+            if os.path.exists(os.path.join(self.data_path, "ego_pose")):
+                total_frames = len(os.listdir(os.path.join(self.data_path, "ego_pose")))
+            elif os.path.exists(os.path.join(self.data_path, "lidar_pose")):
+                total_frames = len(os.listdir(os.path.join(self.data_path, "lidar_pose")))
+            else:
+                raise ValueError("Unable to determine the total number of frames. Neither 'ego_pose' nor 'lidar_pose' directories found.")
+
+            # ---- find the number of synchronized frames ---- #
+            if self.data_cfg.end_timestep == -1:
+                end_timestep = total_frames - 1
+            else:
+                end_timestep = self.data_cfg.end_timestep
+            # to make sure the last timestep is included
+            self.end_timestep = end_timestep + 1
+            self.start_timestep = self.data_cfg.start_timestep
         
         # ---- create layout for visualization ---- #
         self.layout = get_layout(self.type) # return一个函数，用于多个视角的可视化
@@ -83,9 +140,10 @@ class DrivingDataset(SceneDataset):
         # self.pixel_source.camera_data[0].intrinsics
         assert self.pixel_source is not None and self.lidar_source is not None, \
             "Must have both pixel source and lidar source"
-        self.project_lidar_pts_on_images(
-            delete_out_of_view_points=True
-        )
+        if self.type not in ['multibag']:
+            self.project_lidar_pts_on_images(
+                delete_out_of_view_points=True
+            )
         self.aabb = self.get_aabb()
 
         # ---- define train and test indices ---- #
@@ -149,35 +207,62 @@ class DrivingDataset(SceneDataset):
         """
         Create the data source for the dataset.
         """
-        # ---- create pixel source ---- #
-        pixel_source = import_str(self.data_cfg.pixel_source.type)( # 'datasets.nuscenes.nuscenes_sourceloader.NuScenesPixelSource'
-            self.data_cfg.dataset,
-            self.data_cfg.pixel_source,
-            self.data_path,
-            self.start_timestep,
-            self.end_timestep,
-            device=self.device,
-        )
-        pixel_source.to(self.device)
-        
-        self.train_timesteps = pixel_source.train_ts
-        self.test_timesteps = pixel_source.test_ts
-        self.ts2frame = pixel_source.ts2frame
-        self.frame2ts = pixel_source.frame2ts
-        
-        # ---- create lidar source ---- #
-        lidar_source = None
-        if self.data_cfg.lidar_source.load_lidar:
-            lidar_source = import_str(self.data_cfg.lidar_source.type)( # 'datasets.nuscenes.nuscenes_sourceloader.NuScenesLiDARSource'
-                self.data_cfg.lidar_source,
+        if self.type in ['multibag']:
+            # ---- create pixel source ---- #
+            pixel_source = import_str(self.data_cfg.pixel_source.type)(
+                self.data_cfg.dataset,
+                self.data_cfg.pixel_source,
+                self.scene_path,
+                self.start_timestep,
+                self.end_timestep,
+                device=self.device,
+            )
+            pixel_source.to(self.device)
+            
+            # ---- create lidar source ---- #
+            lidar_source = None
+            if self.data_cfg.lidar_source.load_lidar:
+                lidar_source = import_str(self.data_cfg.lidar_source.type)(
+                    self.data_cfg.lidar_source,
+                    self.scene_path,
+                    pixel_source.anchor_pose,
+                    self.start_timestep,
+                    self.end_timestep,
+                    device=self.device,
+                )
+                lidar_source.to(self.device)
+                # assert (pixel_source._unique_normalized_timestamps - lidar_source._unique_normalized_timestamps).abs().sum().item() == 0., \
+                #     "The timestamps of the pixel source and the lidar source are not synchronized"
+        else:
+            # ---- create pixel source ---- #
+            pixel_source = import_str(self.data_cfg.pixel_source.type)( # 'datasets.nuscenes.nuscenes_sourceloader.NuScenesPixelSource'
+                self.data_cfg.dataset,
+                self.data_cfg.pixel_source,
                 self.data_path,
                 self.start_timestep,
                 self.end_timestep,
                 device=self.device,
             )
-            lidar_source.to(self.device)
-            assert (pixel_source._unique_normalized_timestamps - lidar_source._unique_normalized_timestamps).abs().sum().item() == 0., \
-                "The timestamps of the pixel source and the lidar source are not synchronized"
+            pixel_source.to(self.device)
+            if self.type == 'kitti360':
+                self.train_timesteps = pixel_source.train_ts
+                self.test_timesteps = pixel_source.test_ts
+                self.ts2frame = pixel_source.ts2frame
+                self.frame2ts = pixel_source.frame2ts
+            
+            # ---- create lidar source ---- #
+            lidar_source = None
+            if self.data_cfg.lidar_source.load_lidar:
+                lidar_source = import_str(self.data_cfg.lidar_source.type)( # 'datasets.nuscenes.nuscenes_sourceloader.NuScenesLiDARSource'
+                    self.data_cfg.lidar_source,
+                    self.data_path,
+                    self.start_timestep,
+                    self.end_timestep,
+                    device=self.device,
+                )
+                lidar_source.to(self.device)
+                assert (pixel_source._unique_normalized_timestamps - lidar_source._unique_normalized_timestamps).abs().sum().item() == 0., \
+                    "The timestamps of the pixel source and the lidar source are not synchronized"
         return pixel_source, lidar_source
     
     def get_lidar_samples(
@@ -559,7 +644,8 @@ class DrivingDataset(SceneDataset):
         return {
             "pts": seed_pts,
             "colors": seed_colors,
-            "time": seed_time
+            "time": seed_time,
+            "mask": ~inside_mask
         }
 
     def check_pts_visibility(self, pts_xyz):
@@ -592,32 +678,40 @@ class DrivingDataset(SceneDataset):
         return valid_mask
 
     def split_train_test(self):
-        # if self.data_cfg.pixel_source.test_image_stride != 0:
-        #     test_timesteps = np.arange(
-        #         # it makes no sense to have test timesteps before the start timestep
-        #         self.data_cfg.pixel_source.test_image_stride,
-        #         self.num_img_timesteps,
-        #         self.data_cfg.pixel_source.test_image_stride,
-        #     )
-        # else:
-        #     test_timesteps = []
-        # train_timesteps = np.array(
-        #     [i for i in range(self.num_img_timesteps) if i not in test_timesteps]
-        # )
-        # logger.info(
-        #     f"Train timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[train_timesteps]}"
-        # )
-        # logger.info(
-        #     f"Test timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[test_timesteps]}"
-        # )
+        
+        # get train and test timesteps
+        if self.type in ['kitti360']:
+            test_timesteps = self.test_timesteps
+            train_timesteps = self.train_timesteps
+        elif self.data_cfg.pixel_source.test_image_stride != 0:
+            test_timesteps = np.arange(
+                # it makes no sense to have test timesteps before the start timestep
+                self.data_cfg.pixel_source.test_image_stride,
+                self.num_img_timesteps,
+                self.data_cfg.pixel_source.test_image_stride,
+            )
+            train_timesteps = np.array(
+                [i for i in range(self.num_img_timesteps) if i not in test_timesteps]
+            )
+        else:
+            test_timesteps = []
+            train_timesteps = np.array(
+                [i for i in range(self.num_img_timesteps) if i not in test_timesteps]
+            )
+        logger.info(
+            f"Train timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[train_timesteps]}"
+        )
+        logger.info(
+            f"Test timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[test_timesteps]}"
+        )
 
         # propagate the train and test timesteps to the train and test indices
         train_indices, test_indices = [], []
         for t in range(self.num_img_timesteps):
-            if t in self.train_timesteps:
+            if t in train_timesteps:
                 for cam in range(self.pixel_source.num_cams):
                     train_indices.append(t * self.pixel_source.num_cams + cam)
-            elif t in self.test_timesteps:
+            elif t in test_timesteps:
                 for cam in range(self.pixel_source.num_cams):
                     test_indices.append(t * self.pixel_source.num_cams + cam)
         logger.info(f"Number of train indices: {len(train_indices)}")
@@ -628,7 +722,7 @@ class DrivingDataset(SceneDataset):
         # Again, training and testing indices are indices into the full dataset
         # train_indices are img indices, so the length is num_cams * num_train_timesteps
         # but train_timesteps are timesteps, so the length is num_train_timesteps (len(unique_train_timestamps))
-        return self.train_timesteps, self.test_timesteps, train_indices, test_indices
+        return train_timesteps, test_timesteps, train_indices, test_indices
     
     def project_lidar_pts_on_images(self, delete_out_of_view_points=True):
         """
@@ -772,7 +866,7 @@ class DrivingDataset(SceneDataset):
         
         return novel_trajs
 
-    def prepare_novel_view_render_data(self, traj: torch.Tensor) -> list:
+    def prepare_novel_view_render_data(self, cam_id, traj: torch.Tensor) -> list:
             """
             Prepare all necessary elements for novel view rendering.
 
@@ -785,4 +879,4 @@ class DrivingDataset(SceneDataset):
                     - image_infos: Image-related information (indices, normalized time, viewdirs, etc.)
             """
             # Call the PixelSource's method
-            return self.pixel_source.prepare_novel_view_render_data(self.type, traj)
+            return self.pixel_source.prepare_novel_view_render_data(self.type, cam_id, traj)

@@ -30,23 +30,20 @@ def set_seeds(seed=31):
 
 def setup(args):
     # get config
+    
+    # cli > dataset config > config 
     cfg = OmegaConf.load(args.config_file)
     
     # parse datasets
     args_from_cli = OmegaConf.from_cli(args.opts)
-    if "dataset" in args_from_cli:
-        cfg.dataset = args_from_cli.pop("dataset")
+    dataset_type = args_from_cli.pop("dataset")
+    assert dataset_type is not None, "Please specify dataset type in cli"
         
-    assert "dataset" in cfg or "data" in cfg, \
-        "Please specify dataset in config or data in config"
-        
-    if "dataset" in cfg:
-        dataset_type = cfg.pop("dataset")
-        dataset_cfg = OmegaConf.load(
-            os.path.join("configs", "datasets", f"{dataset_type}.yaml")
-        )
-        # merge data
-        cfg = OmegaConf.merge(cfg, dataset_cfg)
+    dataset_cfg = OmegaConf.load(
+        os.path.join("configs", "datasets", f"{dataset_type}.yaml")
+    )
+    # merge data
+    cfg = OmegaConf.merge(cfg, dataset_cfg)
     
     # merge cli
     cfg = OmegaConf.merge(cfg, args_from_cli)
@@ -60,6 +57,11 @@ def setup(args):
     for folder in ["images", "videos", "metrics", "configs_bk", "buffer_maps", "backup"]:
         os.makedirs(os.path.join(log_dir, folder), exist_ok=True)
     
+    # update environment variables
+    os.environ.update({
+        "LOG_DIR": log_dir,
+        "DATASET": dataset_type,
+    })
     # setup wandb
     if args.enable_wandb:
         # sometimes wandb fails to init in cloud machines, so we give it several (many) tries
@@ -245,27 +247,33 @@ def main(args):
         next_iter = False
         while next_iter == False:
             trainer.optimizer_zero_grad() # zero grad
-            # import ipdb ; ipdb.set_trace()
             # get data
             train_step_camera_downscale = trainer._get_downscale_factor()
-            # front train : fisheye train : fisheye test = 2 : 1 : 1
-            if torch.rand(1) < 5.0 / 6.0:
-                if torch.rand(1) < 1.0 / 5.0:
-                    target_cam = [2, 3]
-                else:
-                    target_cam = [0, 1]
-                get_next_train = True
-                while get_next_train:
-                    image_infos, cam_infos = dataset.train_image_set.next(train_step_camera_downscale)
-                    get_next_train = int(cam_infos['cam_id'].flatten()[0].item()) not in target_cam
-            else:
-                get_next_test = True
-                while get_next_test:
-                    image_infos, cam_infos = dataset.test_image_set.next(train_step_camera_downscale)
-                    if cam_infos['cam_id'].flatten()[0].item() < 2:
-                        get_next_test = True
+            
+            # sample training data
+            if os.environ.get("DATASET") == "kitti360/4cams":
+                # front train : fisheye train : fisheye test = 2 : 1 : 1
+                if torch.rand(1) < 5.0 / 6.0:
+                    if torch.rand(1) < 1.0 / 5.0:
+                        target_cam = [2, 3]
                     else:
-                        get_next_test = False
+                        target_cam = [0, 1]
+                    get_next_train = True
+                    while get_next_train:
+                        image_infos, cam_infos = dataset.train_image_set.next(train_step_camera_downscale)
+                        get_next_train = int(cam_infos['cam_id'].flatten()[0].item()) not in target_cam
+                else:
+                    get_next_test = True
+                    while get_next_test:
+                        image_infos, cam_infos = dataset.test_image_set.next(train_step_camera_downscale)
+                        if cam_infos['cam_id'].flatten()[0].item() < 2:
+                            get_next_test = True
+                        else:
+                            get_next_test = False
+            else:
+                image_infos, cam_infos = dataset.train_image_set.next(train_step_camera_downscale)
+                if 'road_masks' in image_infos:
+                    image_infos['road_masks'][-1, -1] = 1.0
             for k, v in image_infos.items():
                 if isinstance(v, torch.Tensor):
                     image_infos[k] = v.cuda(non_blocking=True)
@@ -288,10 +296,12 @@ def main(args):
                     raise ValueError(f"NaN detected in loss {k} at step {step}")
                 if torch.isinf(v).any():
                     raise ValueError(f"Inf detected in loss {k} at step {step}")
-            # print(loss_dict.keys(), image_infos['img_idx'].flatten()[0].item())
             trainer.backward(loss_dict)
-            next_iter = outputs['next_iter']
-        
+            
+            if os.environ.get("DATASET") == "kitti360/4cams":
+                next_iter = outputs['next_iter']
+            else:
+                next_iter = True        
         # after training step
         trainer.postprocess_per_train_step(step=step)
         

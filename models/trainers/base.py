@@ -87,7 +87,7 @@ class BasicTrainer(nn.Module):
         self.res_schedule = res_schedule
         self.model_config = model_config
         self.num_iters = self.optim_general.get("num_iters", 30000)
-        self.neus_iters = self.optim_general.get("neus_iters", 10000)
+        self.lidar_pretrain_iters = self.optim_general.get("lidar_pretrain_iters", 10000)
         self.gaussian_optim_general_cfg = gaussian_optim_general_cfg
         self.gaussian_ctrl_general_cfg = gaussian_ctrl_general_cfg
         self.step = 0
@@ -103,7 +103,7 @@ class BasicTrainer(nn.Module):
         # init models
         self.models = {}
         self.misc_classes_keys = [
-            'Sky', 'Affine', 'CamPose', 'CamPosePerturb', 'CamPose_ts', 'CamPose_ts_neus'
+            'Sky', 'Affine', 'CamPose', 'CamPosePerturb', 'CamPose_ts', 'CamPose_ts_neus', 'CameraEncod'
         ]
         self.gaussian_classes = {}
         self._init_models()
@@ -296,43 +296,41 @@ class BasicTrainer(nn.Module):
                 underground_mask = sdf < -1
                 self.models[class_name].under_ground = underground_mask
     def postprocess_per_train_step(self, step: int) -> None:
-        if self.step < self.neus_iters:
+        if self.step < self.lidar_pretrain_iters:
             return
-        if self.step == self.neus_iters:
-            if os.environ.get('DATASET') == "kitti360/4cams":
+        if self.step == self.lidar_pretrain_iters:
+            # 增加背景随机点
+            init_cfg = self.model_config['Background'].get('init', None)
+            # add random pts
+            random_pts = []
+            num_near_pts = init_cfg.get('near_randoms', 0)
+            if num_near_pts > 0: # uniformly sample points inside the scene's sphere
+                num_near_pts *= 3 # since some invisible points will be filtered out
+                random_pts.append(uniform_sample_sphere(num_near_pts, self.device))
+            num_far_pts = init_cfg.get('far_randoms', 0)
+            if num_far_pts > 0: # inverse distances uniformly from (0, 1 / scene_radius)
+                num_far_pts *= 3
+                random_pts.append(uniform_sample_sphere(num_far_pts, self.device, inverse=True))
+            
+            if num_near_pts + num_far_pts > 0:
+                random_pts = torch.cat(random_pts, dim=0) 
+                random_pts = random_pts * self.scene_radius + self.scene_origin
+                visible_mask = self.init_dataset.check_pts_visibility(random_pts)
+                valid_pts = random_pts[visible_mask]
                 
-                # 增加背景随机点
-                init_cfg = self.model_config['Background'].get('init', None)
-                # add random pts
-                random_pts = []
-                num_near_pts = init_cfg.get('near_randoms', 0)
-                if num_near_pts > 0: # uniformly sample points inside the scene's sphere
-                    num_near_pts *= 3 # since some invisible points will be filtered out
-                    random_pts.append(uniform_sample_sphere(num_near_pts, self.device))
-                num_far_pts = init_cfg.get('far_randoms', 0)
-                if num_far_pts > 0: # inverse distances uniformly from (0, 1 / scene_radius)
-                    num_far_pts *= 3
-                    random_pts.append(uniform_sample_sphere(num_far_pts, self.device, inverse=True))
-                
-                if num_near_pts + num_far_pts > 0:
-                    random_pts = torch.cat(random_pts, dim=0) 
-                    random_pts = random_pts * self.scene_radius + self.scene_origin
-                    visible_mask = self.init_dataset.check_pts_visibility(random_pts)
-                    valid_pts = random_pts[visible_mask]
-                    
-                    sampled_pts = valid_pts
-                    sampled_color = torch.rand(valid_pts.shape, ).to(self.device)
-                    from_lidar = torch.zeros(valid_pts.shape[0], dtype=torch.float32).to(self.device)
-                
-                self.models['Background'].add_points(sampled_pts, sampled_color, from_lidar)
-                self.initialize_optimizer()
-            # processed_init_pts = dataset.filter_pts_in_boxes(
-            #     seed_pts=sampled_pts,
-            #     seed_colors=sampled_color,
-            #     valid_instances_dict=allnode_pts_dict
-            # )
-            # if self.ground_method in ['rsg']:
-            #     self.neus23dgs()
+                sampled_pts = valid_pts
+                sampled_color = torch.rand(valid_pts.shape, ).to(self.device)
+                from_lidar = torch.zeros(valid_pts.shape[0], dtype=torch.float32).to(self.device)
+            
+            processed_init_pts = self.init_dataset.filter_pts_in_boxes(
+                seed_pts=sampled_pts,
+                seed_colors=sampled_color,
+                valid_instances_dict=self.allnode_pts_dict
+            )
+            self.models['Background'].add_points(init_means=processed_init_pts['pts'], init_colors=processed_init_pts['colors'], from_lidar=from_lidar[processed_init_pts['mask']])
+
+            # 重置优化器
+            self.initialize_optimizer()
             return
 
         radii = self.info["radii"]
@@ -362,13 +360,14 @@ class BasicTrainer(nn.Module):
         # gaussians postprocess
         for class_name in self.gaussian_classes.keys():
             if class_name == "Ground_gs":
-                self.models[class_name].postprocess_per_train_step(
-                    step=step,
-                    optimizer=self.optimizer,
-                    radii=radii_ground[0, :],
-                    xys_grad=grads_ground[0, :],
-                    last_size=max(self.ground_info["width"], self.ground_info["height"])
-                )
+                if self.ground_method in ['rsg']:
+                    self.models[class_name].postprocess_per_train_step(
+                        step=step,
+                        optimizer=self.optimizer,
+                        radii=radii_ground[0, :],
+                        xys_grad=grads_ground[0, :],
+                        last_size=max(self.ground_info["width"], self.ground_info["height"])
+                    )
             else:
                 gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
             
@@ -394,9 +393,13 @@ class BasicTrainer(nn.Module):
             self.viewer.update(step, num_train_rays_per_step)
     
     def update_visibility_filter(self) -> None:
+        # cur_radii 指出现在当前图像的gs，在sparse_reg中用到
         for class_name in self.gaussian_classes.keys():
-            gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
-            self.models[class_name].cur_radii = self.info["radii"][0, gaussian_mask]
+            if class_name == "Ground_gs" and self.ground_method in ['rsg']:
+                self.models[class_name].cur_radii = self.ground_info["radii"][0, :]
+            else:
+                gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
+                self.models[class_name].cur_radii = self.info["radii"][0, gaussian_mask]
 
     def process_camera(
         self,
@@ -698,7 +701,7 @@ class BasicTrainer(nn.Module):
             predicted_rgb = outputs["rgb"] * valid_loss_mask[..., None]
             
             if ("Ground" in self.models or "Ground_gs" in self.models) and image_infos['is_pseudo'] is False:
-                # 3dgs 在路面趋于0
+                # 3dgs 在路面趋于0，天空趋于0
                 care_opacity_3dgs = valid_loss_mask
                 gt_opacity_3dgs = (1.0 - image_infos["sky_masks"]).float() * (1.0 - image_infos['road_masks']).float() * care_opacity_3dgs
                 pred_opacity_3dgs = outputs['3dgs']["opacity"].squeeze() * care_opacity_3dgs
@@ -708,10 +711,12 @@ class BasicTrainer(nn.Module):
                     gt_opacity_2dgs = torch.ones_like(image_infos['sky_masks']) * care_opacity_2dgs
                     pred_opacity_2dgs = outputs['ground_gs']['opacity'].squeeze() * care_opacity_2dgs
                     
-                    # blended 在天空趋于0, 在非天空趋于1
-                    # care_opacity_blended = valid_loss_mask
-                    # gt_opacity_blended = (1.0 - image_infos["sky_masks"]).float() * care_opacity_blended
-                    # pred_opacity_blended = outputs["blended_opacity"].squeeze() * care_opacity_blended
+                    # 2dgs 在天空趋于0
+                    # care_opacity_2dgs_sky = image_infos['sky_masks']
+                    # H, W = care_opacity_2dgs_sky.shape
+                    # care_opacity_2dgs_sky[:2 * H // 5, :] = 1.0
+                    # gt_opacity_2dgs_sky = torch.zeros_like(image_infos['sky_masks']) * care_opacity_2dgs_sky
+                    # pred_opacity_2dgs_sky = outputs['ground_gs']['opacity'].squeeze() * care_opacity_2dgs_sky
         
             # rgb loss
             # over_mask = gt_rgb >= 1.0
@@ -751,8 +756,8 @@ class BasicTrainer(nn.Module):
                 depth_loss = self.depth_loss_fn(pred_depth, gt_depth, lidar_hit_mask)
                 
                 lidar_w_decay = self.losses_dict.depth.get("lidar_w_decay", -1)
-                if lidar_w_decay > 0 and self.step > self.neus_iters:
-                    decay_weight = np.exp(-(self.step - self.neus_iters) / 8000 * lidar_w_decay)
+                if lidar_w_decay > 0 and self.step > self.lidar_pretrain_iters:
+                    decay_weight = np.exp(-(self.step) / 8000 * lidar_w_decay)
                 else:
                     decay_weight = 1
                 depth_loss = depth_loss * self.losses_dict.depth.w * decay_weight
@@ -818,36 +823,37 @@ class BasicTrainer(nn.Module):
                 for k, v in class_reg_loss.items():
                     loss_dict[f"{class_name}_{k}"] = v
         if 'ground_gs' in outputs:
-            # normal consistency loss
-            depth_normal = outputs['ground_gs']['normal_from_depth'] * outputs['ground_gs']['opacity'].detach() * image_infos['road_masks'].unsqueeze(-1)
-            depth_normal = depth_normal.permute(2, 0, 1)
-            normal = outputs['ground_gs']['normal'] * image_infos['road_masks'].unsqueeze(-1)
-            normal = normal.permute(2, 0, 1)
+            if self.losses_dict.get("normal_consistency", None) is not None:
+                # normal consistency loss
+                depth_normal = outputs['ground_gs']['normal_from_depth'] * outputs['ground_gs']['opacity'].detach() * image_infos['road_masks'].unsqueeze(-1)
+                depth_normal = depth_normal.permute(2, 0, 1)
+                normal = outputs['ground_gs']['normal'] * image_infos['road_masks'].unsqueeze(-1)
+                normal = normal.permute(2, 0, 1)
+                
+                # 最外面一圈depth normal是[0, 0 ,0]，但是不影响normal
+                normal_error = (1 - (normal * depth_normal).sum(dim=0))[None]
+                loss_dict.update({
+                    "normal_consistency_loss": self.losses_dict.normal_consistency.w * normal_error.mean()
+                })
             
-            # 最外面一圈depth normal是[0, 0 ,0]，但是不影响normal
-            normal_error = (1 - (normal * depth_normal).sum(dim=0))[None]
-            loss_dict.update({
-                "normal_consistency_loss": 0.1 * normal_error.mean()
-            })
+            if self.losses_dict.get("distortion", None) is not None:
+                # distortion loss
+                dist = outputs['ground_gs']['render_distort'] * image_infos['road_masks'].unsqueeze(-1)
+                dist = dist.permute(2, 0, 1)
+                dist_loss = dist.mean()
+                loss_dict.update({
+                    "distortion_loss": self.losses_dict.distortion.w * dist_loss
+                })
             
-            
-            # # distortion loss
-            # dist = outputs['ground_gs']['render_distort'] * image_infos['road_masks'].unsqueeze(-1)
-            # dist = dist.permute(2, 0, 1)
-            # dist_loss = dist.mean()
-            # loss_dict.update({
-            #     "distortion_loss": 0.1 * dist_loss
-            # })
-            
-            
-            # align error
-            align_error = outputs['ground_gs']['align_error']
-            # print(align_error)
-            loss_dict.update({
-                "align_error": align_error * 1e2
-            })
+            if self.losses_dict.get("align_error", None) is not None:
+                # align error
+                align_error = outputs['ground_gs']['align_error']
+                # print(align_error)
+                loss_dict.update({
+                    "align_error": align_error * self.losses_dict.align_error.w
+                })
         if image_infos['is_pseudo']:
-            return {}
+            raise Exception("Not Implemented")
         return loss_dict
     
     def compute_metrics(

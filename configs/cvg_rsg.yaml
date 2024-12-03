@@ -4,13 +4,14 @@ dataset: waymo/3cams
 # ------------- Trainer ------------ #
 trainer:
   type: models.trainers.MultiTrainer
-  ground_method: neus # [neus, rsg]
+  ground_method: rsg # [neus, rsg]
   optim:
     num_iters: 40000
-    lidar_pretrain_iters: 0
+    lidar_pretrain_iters: 10000
     use_grad_scaler: false
     cache_buffer_freq: -1 # we use error based image sampler for training with more than 3 cameras
   render:
+    render_ground: True
     near_plane: 0.1 # near plane for rendering
     far_plane: 10000000000.0 # far plane for rendering
     antialiased: false # whether to use antialiasing for gaussian rendering, supported by gsplat kernel
@@ -26,26 +27,26 @@ trainer:
     mask:
       w: 0.5
       opacity_loss_type: bce # choose from [bce, safe_bce]
-    depth:
-      w: 0.01 # weight of depth loss
-      inverse_depth: False # whether to use inverse depth, NOTE that when set to True, must normalize=True
-      normalize: False # whether to normalize depth loss
-      loss_type: l1 # choose from ["l1", "l2"]
-      lidar_w_decay: 1.0
+    # consistency:
+    #   w: 0.1
+    #   start_iter: 10000
+    # distortion:
+    #   w: 0.1
+    # depth:
+    #   w: 0.01 # weight of depth loss
+    #   inverse_depth: False # whether to use inverse depth, NOTE that when set to True, must normalize=True
+    #   normalize: False # whether to normalize depth loss
+    #   loss_type: l1 # choose from ["l1", "l2"]
     affine:
       w: 0.00001 # weight of affine regularization
-    normal_consistency:
+    ground_gs_sdf:
       w: 0.1
-    distortion:
-      w: 0.1
-    align_error:
-      w: 1e2
   res_schedule:
     double_steps: 250 # training starts at 1/d resolution, every n steps this is doubled
     downscale_times: 2 # at the beginning, resolution is 1/2^d, where d is this number
   gaussian_optim_general_cfg:
     xyz:
-      lr: 6.4e-04
+      lr: 1.6e-04
       lr_final: 1.6e-06
       scale_factor: scene_radius # str or float, if "scene_scale", scale the learning rate by the scene scale
     sh_dc:
@@ -62,7 +63,7 @@ trainer:
     warmup_steps: 2000             # warmup steps for alpha
     reset_alpha_interval: 3000    # reset alpha every n steps
     refine_interval: 300          # refine gaussians every n steps
-    sh_degree_interval: 1000      # every n intervals turn on another sh degree # TODO adapt
+    sh_degree_interval: 1000      # every n intervals turn on another sh degree
     n_split_samples: 2            # number of samples to split gaussians into
     # may differ in different models
     reset_alpha_value: 0.01       # reset alpha to this value
@@ -91,11 +92,6 @@ model:
         w: 1.
         step_interval: 10
         max_gauss_ratio: 10.       # threshold of ratio of gaussian max to min scale before applying regularization loss from the PhysGaussian paper
-      # sparse_reg:
-      #   start_step: 35000
-      #   w: 1e-1
-
-# {'type': 'models.gaussians.VanillaGaussians', 'reg': {'sharp_shape_reg': {'w': 1.0, 'step_interval': 10, 'max_gauss_ratio': 10.0}}, 'optim': {'xyz': {'lr': 0.00064, 'lr_final': 1.6e-06, 'scale_factor': 'scene_radius'}, 'sh_dc': {'lr': 0.0025}, 'sh_rest': {'lr': 0.000125}, 'opacity': {'lr': 0.05}, 'scaling': {'lr': 0.005}, 'rotation': {'lr': 0.001}}, 'ctrl': {'warmup_steps': 2000, 'reset_alpha_interval': 3000, 'refine_interval': 300, 'sh_degree_interval': 1000, 'n_split_samples': 2, 'reset_alpha_value': 0.01, 'densify_grad_thresh': 0.0005, 'densify_size_thresh': 0.003, 'cull_alpha_thresh': 0.005, 'cull_scale_thresh': 0.5, 'cull_screen_size': 0.15, 'split_screen_size': 0.05, 'stop_screen_size_at': 14000, 'stop_split_at': 35000, 'sh_degree': 3}}
   Ground_gs:
     type: models.gaussians.VanillaGaussians
     reg:
@@ -103,97 +99,110 @@ model:
         w: 1.
         step_interval: 10
         max_gauss_ratio: 5.
+      # sparse_reg:
+      #   w: 0.1
+      #   start_step: 10000
+      max_s_square_reg:
+        w: 0.1
     optim:
       xyz:
         lr: 6.4e-04
         lr_final: 1.6e-06
-        scale_factor: 1.0
+        scale_factor: 10.0
     ctrl:
-      densify_grad_thresh: 0.0002
+      densify_grad_thresh: 0.00005
       cull_alpha_thresh: 0.005
-      sh_degree: 1
-      reset_alpha_interval: 50000
-  RigidNodes:
-    type: models.nodes.RigidNodes
-    init:
-      instance_max_pts: 5000 # max initial points for each instance
-      only_moving: true # only optimize moving instances
-      traj_length_thres: 1.0 # threshold of trajectory length for moving instances
-    ctrl:
-      cull_scale_thresh: 0.1
-      stop_screen_size_at: 40000
-      stop_split_at: 30000
-      cull_out_of_bound: true
-    reg:
-      sharp_shape_reg:
-        w: 1.
-        step_interval: 10
-        max_gauss_ratio: 10.
-      temporal_smooth_reg:
-        trans:
-          w: 0.01 # optimal value may vary
-          smooth_range: 5 # no ablation
-    optim:
-      ins_rotation:
-        lr: 0.00001
-        lr_final: 0.000005
-      ins_translation:
-        lr: 0.0005
-        lr_final: 0.0001
-  DeformableNodes:
-    type: models.nodes.DeformableNodes
-    init:
-      instance_max_pts: 5000
-      only_moving: true
-      traj_length_thres: 0.5
-    networks:
-      D: 8
-      W: 256
-      embed_dim: 16
-      x_multires: 10                # default 10
-      t_multires: 10                # default 10
-      deform_quat: True
-      deform_scale: False
-    ctrl:
-      reset_alpha_value: 0.1
-      cull_scale_thresh: 0.1
-      stop_screen_size_at: 40000
-      stop_split_at: 30000
       sh_degree: 3
-      cull_out_of_bound: false
-      use_deformgs_for_nonrigid: True # default True
-      use_deformgs_after: 13000        # default 3000
-      stop_optimizing_canonical_xyz: True
-    reg:
-      sharp_shape_reg:
-        w: 1.
-        step_interval: 10
-        max_gauss_ratio: 10.
-      out_of_bound_loss:
-        w: 1.
-        stop_after: 40000
-      temporal_smooth_reg:
-        trans:
-          w: 0.01 # optimal value may vary
-          smooth_range: 5 # optimal value may vary
+      sh_degree_interval: 10000
+  CameraEncod:
+    type: models.modules.CameraEncod
+    params:
+      n_camera: 7
     optim:
-      xyz:
-        lr: 1.6e-04
-        lr_final: 1.6e-06
-        scale_factor: 2.
-      embedding:
-        lr: 0.001
-        lr_final: 0.0001
-      deform_network:
-        lr: 1.6e-03
-        lr_final: 1.6e-04
-        scale_factor: 5.
-      ins_rotation:
-        lr: 0.00001
-        lr_final: 0.000005
-      ins_translation:
-        lr: 0.0005
-        lr_final: 0.0001
+      all:
+        lr: 5.0e-5
+        weight_decay: 1.0e-6
+  # RigidNodes:
+  #   type: models.nodes.RigidNodes
+  #   init:
+  #     instance_max_pts: 5000 # max initial points for each instance
+  #     only_moving: true # only optimize moving instances
+  #     traj_length_thres: 1.0 # threshold of trajectory length for moving instances
+  #   ctrl:
+  #     cull_scale_thresh: 0.1
+  #     stop_screen_size_at: 30000
+  #     stop_split_at: 20000
+  #     cull_out_of_bound: true
+  #   reg:
+  #     sharp_shape_reg:
+  #       w: 1.
+  #       step_interval: 10
+  #       max_gauss_ratio: 10.
+  #     temporal_smooth_reg:
+  #       trans:
+  #         w: 0.01 # optimal value may vary
+  #         smooth_range: 5 # no ablation
+  #   optim:
+  #     ins_rotation:
+  #       lr: 0.00001
+  #       lr_final: 0.000005
+  #     ins_translation:
+  #       lr: 0.0005
+  #       lr_final: 0.0001
+  # DeformableNodes:
+  #   type: models.nodes.DeformableNodes
+  #   init:
+  #     instance_max_pts: 5000
+  #     only_moving: true
+  #     traj_length_thres: 0.5
+  #   networks:
+  #     D: 8
+  #     W: 256
+  #     embed_dim: 16
+  #     x_multires: 10                # default 10
+  #     t_multires: 10                # default 10
+  #     deform_quat: True
+  #     deform_scale: False
+  #   ctrl:
+  #     reset_alpha_value: 0.1
+  #     cull_scale_thresh: 0.1
+  #     stop_screen_size_at: 30000
+  #     stop_split_at: 20000
+  #     sh_degree: 3
+  #     cull_out_of_bound: false
+  #     use_deformgs_for_nonrigid: True # default True
+  #     use_deformgs_after: 3000        # default 3000
+  #     stop_optimizing_canonical_xyz: True
+  #   reg:
+  #     sharp_shape_reg:
+  #       w: 1.
+  #       step_interval: 10
+  #       max_gauss_ratio: 10.
+  #     out_of_bound_loss:
+  #       w: 1.
+  #       stop_after: 30000
+  #     temporal_smooth_reg:
+  #       trans:
+  #         w: 0.01 # optimal value may vary
+  #         smooth_range: 5 # optimal value may vary
+  #   optim:
+  #     xyz:
+  #       lr: 1.6e-04
+  #       lr_final: 1.6e-06
+  #       scale_factor: 2.
+  #     embedding:
+  #       lr: 0.001
+  #       lr_final: 0.0001
+  #     deform_network:
+  #       lr: 1.6e-03
+  #       lr_final: 1.6e-04
+  #       scale_factor: 5.
+  #     ins_rotation:
+  #       lr: 0.00001
+  #       lr_final: 0.000005
+  #     ins_translation:
+  #       lr: 0.0005
+  #       lr_final: 0.0001
   # SMPLNodes: 
   #   type: models.nodes.SMPLNodes
   #   init:
@@ -249,7 +258,7 @@ model:
   #     w_dc_vox:
   #       lr: 0.0001
   #       lr_final: 0.00001
-  #       opt_after: 20000
+  #       opt_after: 10000
   #   ctrl:
   #     sh_degree: 1
   #     opacity_init_value: 0.99
@@ -264,22 +273,10 @@ model:
   #     freeze_s: false
   #     freeze_shs_dc: false
   #     freeze_shs_rest: false
-  Ground:
+  Ground_neus:
     type: models.modules.Ground
-    pretrain_method: lidar # [egopose, lidar]
-    pretrain_iters: 0
     params:
-      batch_size: 32768
       resolution: 1024
-      losses: 
-        l1:
-          w: 1.
-        eikonal:
-          w: 1.
-        s_val:
-          w: 1.
-        delta_color:
-          w: 1.
     optim:
       all:
         lr: 5.0e-4
@@ -298,40 +295,20 @@ model:
       pixel_affine: False
     optim:
       all:
-        lr: 5.0e-5
+        lr: 1.0e-5
         weight_decay: 1.0e-6
-  CamPose_ts:
-    type: models.modules.CameraOptModule_ts
+  CamPose:
+    type: models.modules.CameraOptModule
     optim:
       all:
         lr: 1.0e-5
         weight_decay: 1.0e-6
-  ExtrinsicPose:
-    type: models.modules.ExtrinsicOptModule
-    optim:
-      all:
-        lr: 1.0e-5
-        weight_decay: 1.0e-6
-  CamPose_ts_neus:
-    type: models.modules.CameraOptModule_ts
-    optim:
-      all:
-        lr: 1.0e-5
-        weight_decay: 1.0e-6
-  ExtrinsicPose_neus:
-    type: models.modules.ExtrinsicOptModule
-    optim:
-      all:
-        lr: 1.0e-5
-        weight_decay: 1.0e-6
-
-  # CamPose:
-  #   type: models.modules.CameraOptModule
-  #   optim:
-  #     all:
-  #       lr: 1.0e-5
-  #       weight_decay: 1.0e-6
-
+  # CamPose_ts:
+  #     type: models.modules.CameraOptModule_ts
+  #     optim:
+  #       all:
+  #         lr: 1.0e-5
+  #         weight_decay: 1.0e-6
 # ------------- render ------------ #
 render:
   fps: 10 # frames per second for the main rendered output
@@ -339,16 +316,26 @@ render:
   render_test: True # whether to render test set
   render_novel: 
     traj_types:
-      - front_center_interp # type of trajectory for novel view synthesis
-      - x_shift_left
+      # - front_center_interp # type of trajectory for novel view synthesis
+      # - s_curve
+      # - three_key_poses
+      # - x_shift_left
+      # - y_shift_left
+      - y_shift_right_ff
+      - y_shift_right
+      - y_shift_right_fr
+      - y_shift_right_fl
+      - y_shift_right_rl
+      - y_shift_right_rr
+      - y_shift_right_rm
     fps: 24 # frames per second for novel view rendering
   vis_lidar: False # whether to visualize lidar points on ground truth images
   vis_sky: False # whether to include "rgb_sky" and "rgb_sky_blend" in rendered keys
-  vis_error: True # whether to include "rgb_error_map" in rendered keys
+  vis_error: False # whether to include "rgb_error_map" in rendered keys
 
 # ------------- logging ------------ #
 logging:
   vis_freq: 2000 # how often to visualize training stats
   print_freq: 500 # how often to print training stats
-  saveckpt_freq: 5000 # how often to save checkpoints
+  saveckpt_freq: 15000 # how often to save checkpoints
   save_seperate_video: True # whether to save seperate videos for each scene

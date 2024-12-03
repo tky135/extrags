@@ -873,7 +873,7 @@ import cv2
 idx2color = [[157, 234, 50], [211, 211, 202], [233, 74, 127], [85, 37, 136], [250, 220, 2], [157, 234, 50]]
 
 class Ground(nn.Module):
-    def __init__(self, log_dir, dataset, ground_config):
+    def __init__(self, log_dir, dataset, ground_config, render_full):
         super(Ground, self).__init__()
         # initialize everything model
         
@@ -887,7 +887,7 @@ class Ground(nn.Module):
         self.val_freq = 1000
         self.val_mesh_freq = 10000
         self.batch_size = self.config['params']['batch_size']
-        self.render_full = self.config['params']['render_full']
+        self.render_full = render_full
         self.losses = self.config['params']['losses']
         self.validate_resolution_level = 4
         self.learning_rate = self.config['optim']['all']['lr']
@@ -1254,7 +1254,7 @@ class Ground(nn.Module):
             return 1.0
         else:
             return np.min([1.0, self.iter_step / self.anneal_end])
-    def forward(self, image_infos, camera_infos) -> torch.Tensor:
+    def forward(self, image_infos, camera_infos, force_render_full=False) -> torch.Tensor:
         """
         image_infos: {
             'origins': torch.Tensor, [900 / d, 1600 / d, 3]. 都是同一个origin
@@ -1286,11 +1286,6 @@ class Ground(nn.Module):
         # 训练模式下会多输出计算图上的self.batch_size个变量
         is_train = image_infos['is_train']
         H, W, _ = image_infos['viewdirs'].shape
-        if not is_train and not self.render_full:
-            render_out = {}
-            render_out['rgb'] = torch.ones((H, W, 3), device=self.device) * 0.5
-            render_out['opacity'] = torch.ones((H, W, 1), device=self.device) * 0.5
-            return render_out
 
         # H, W是原始图片大小
         if 'road_masks' not in image_infos:
@@ -1361,15 +1356,12 @@ class Ground(nn.Module):
                                         cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                         camera_encod=camera_encod_train.reshape(-1) if camera_encod is not None else None)
             render_out.update(render_out_train)
-            if self.iter_step < self.neus_iters and not self.render_full:
+        if not self.render_full and not force_render_full:
+            if is_train:
+                # 真值用来计算loss
                 render_out['gt_rgb'] = image_infos['pixels'][train_mask == 1]
-                return render_out
-        if is_train and not self.render_full:
-            render_out['gt_rgb'] = image_infos['pixels'][train_mask == 1]
-            render_out['rgb'] = torch.ones((H, W, 3), device=c2w.device) * 0.5
-            render_out['opacity'] = torch.ones((H, W, 1), device=c2w.device) * 0.5
             return render_out
-        # test
+        # render full
         # save memory render
         rays_o_test = rays_o[test_mask == 1]
         rays_d_test = rays_d[test_mask == 1]

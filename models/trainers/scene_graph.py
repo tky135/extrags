@@ -109,7 +109,7 @@ class MultiTrainer(BasicTrainer):
                     device=self.device
                 ).to(self.device)
             elif class_name == 'Ground':
-                model = import_str(model_cfg.type)(log_dir=self.log_dir, dataset=self.dataset, ground_config=model_cfg).to(self.device)
+                model = import_str(model_cfg.type)(log_dir=self.log_dir, dataset=self.dataset, ground_config=model_cfg, render_full=self.ground_method in ['neus']).to(self.device)
             elif class_name == 'ExtrinsicPose' or class_name == 'ExtrinsicPose_neus':
                 model = import_str(model_cfg.type)(
                     class_name=class_name,
@@ -161,7 +161,6 @@ class MultiTrainer(BasicTrainer):
             self.ego_normals = self.cam_0_to_neus_world[:, :3, :3] @ torch.tensor([0, -1, 0]).type(torch.float32).to(self.cam_0_to_neus_world.device)
             self.models['Ground'].ego_points = self.ego_points.cpu().numpy()
             self.models['Ground'].ego_normals = self.ego_normals.cpu().numpy()
-            self.models['Ground'].neus_iters = self.neus_iters
             self.scale_mat = self.models['Ground'].scale_mat
             if type(self.scale_mat) != torch.Tensor:
                 self.scale_mat = torch.tensor(self.scale_mat).to(self.device)
@@ -254,41 +253,14 @@ class MultiTrainer(BasicTrainer):
                     sampled_pts, sampled_color, sampled_time = \
                         torch.empty(0, 3).to(self.device), torch.empty(0, 3).to(self.device), None
                 from_lidar = torch.ones(sampled_pts.shape[0], dtype=torch.float32).to(self.device)
-                if os.environ.get("DATASET") != "kitti360/4cams":
-                    random_pts = []
-                    num_near_pts = init_cfg.get('near_randoms', 0)
-                    if num_near_pts > 0: # uniformly sample points inside the scene's sphere
-                        num_near_pts *= 3 # since some invisible points will be filtered out
-                        random_pts.append(uniform_sample_sphere(num_near_pts, self.device))
-                    num_far_pts = init_cfg.get('far_randoms', 0)
-                    if num_far_pts > 0: # inverse distances uniformly from (0, 1 / scene_radius)
-                        num_far_pts *= 3
-                        random_pts.append(uniform_sample_sphere(num_far_pts, self.device, inverse=True))
-                    
-                    if num_near_pts + num_far_pts > 0:
-                        random_pts = torch.cat(random_pts, dim=0) 
-                        random_pts = random_pts * self.scene_radius + self.scene_origin
-                        visible_mask = dataset.check_pts_visibility(random_pts)
-                        valid_pts = random_pts[visible_mask]
-                        
-                        sampled_pts = torch.cat([sampled_pts, valid_pts], dim=0)
-                        sampled_color = torch.cat([sampled_color, torch.rand(valid_pts.shape, ).to(self.device)], dim=0)
-                        from_lidar = torch.cat([from_lidar, torch.zeros(valid_pts.shape[0], dtype=torch.float32).to(self.device)], dim=0)
-                else:
-                    self.init_dataset = dataset
-                # import open3d as o3d
-                # pcd = o3d.geometry.PointCloud()
-                # pcd.points = o3d.utility.Vector3dVector(sampled_pts.cpu().numpy())
-                # pcd.colors = o3d.utility.Vector3dVector(sampled_color.cpu().numpy())
-                # o3d.io.write_point_cloud("sampled_pts_before_filter.pcd", pcd)
+                
+                self.init_dataset = dataset
+                self.allnode_pts_dict = allnode_pts_dict
                 processed_init_pts = dataset.filter_pts_in_boxes(
                     seed_pts=sampled_pts,
                     seed_colors=sampled_color,
                     valid_instances_dict=allnode_pts_dict
                 )
-                # pcd.points = o3d.utility.Vector3dVector(processed_init_pts['pts'].cpu().numpy())
-                # pcd.colors = o3d.utility.Vector3dVector(processed_init_pts['colors'].cpu().numpy())
-                # o3d.io.write_point_cloud("sampled_pts_after_filter.pcd", pcd)
                 
                 model.create_from_pcd(
                     init_means=processed_init_pts['pts'], init_colors=processed_init_pts['colors'], from_lidar=from_lidar[processed_init_pts['mask']]
@@ -456,8 +428,8 @@ class MultiTrainer(BasicTrainer):
             # 2dgs只在意路面部分，在这里改变不影响3dgs
             if self.training:
                 outputs_ground['rgb'] = outputs_ground['rgb_gaussians'] * image_infos['road_masks'].unsqueeze(-1) + outputs_ground['rgb_gaussians'].detach() * (1 - image_infos['road_masks'].unsqueeze(-1))
-                outputs_ground['normal'] = outputs_ground['normal'] * image_infos['road_masks'].unsqueeze(-1)
-                outputs_ground['normal_from_depth'] = outputs_ground['normal_from_depth'] * image_infos['road_masks'].unsqueeze(-1)
+                outputs_ground['normal'] = outputs_ground['normal']# * image_infos['road_masks'].unsqueeze(-1)
+                outputs_ground['normal_from_depth'] = outputs_ground['normal_from_depth']# * image_infos['road_masks'].unsqueeze(-1)
             else:
                 outputs_ground['rgb'] = outputs_ground['rgb_gaussians']
             outputs['ground_gs'] = outputs_ground

@@ -7,7 +7,7 @@ trainer:
   ground_method: neus # [neus, rsg]
   optim:
     num_iters: 40000
-    neus_iters: 10000
+    lidar_pretrain_iters: 10000
     use_grad_scaler: false
     cache_buffer_freq: -1 # we use error based image sampler for training with more than 3 cameras
   render:
@@ -247,7 +247,6 @@ model:
     params:
       batch_size: 32768
       resolution: 1024
-      render_full: True
       losses: 
         l1:
           w: 1.

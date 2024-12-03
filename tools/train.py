@@ -404,5 +404,5 @@ if __name__ == "__main__":
     parser.add_argument("opts", help="Modify config options using the command-line", default=None, nargs=argparse.REMAINDER)
     
     args = parser.parse_args()
-    args.enable_wandb = True
+    # args.enable_wandb = True
     final_step = main(args)

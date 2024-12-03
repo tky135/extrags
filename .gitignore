@@ -7,3 +7,4 @@ __pycache__/
 /output/
 /.output_results/
 /*.png
+/third_party/

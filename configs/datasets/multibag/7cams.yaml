@@ -36,4 +36,4 @@ data:
     lidar_percentile: 0.02  # percentile to compute aabb from lidar
 
 trainer:
-  ground_method: neus
+  ground_method: rsg

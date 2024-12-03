@@ -331,8 +331,8 @@ class BasicTrainer(nn.Module):
             #     seed_colors=sampled_color,
             #     valid_instances_dict=allnode_pts_dict
             # )
-            if self.ground_method in ['rsg']:
-                self.neus23dgs()
+            # if self.ground_method in ['rsg']:
+            #     self.neus23dgs()
             return
 
         radii = self.info["radii"]

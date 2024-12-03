@@ -62,42 +62,13 @@ class MultiTrainer(BasicTrainer):
         from_lidar = torch.zeros_like(points[:, 0]).float()
         self.models['Ground_gs'].create_from_pcd(init_means=points, init_colors=colors, from_lidar=from_lidar, init_opacity=0.5)
         self.gaussian_classes['Ground_gs'] = GSModelType.Ground_gs
-        print("Converted neus to 2dgs")
-        
-        # camera model 
-        import copy
-        # self.color_network = copy.deepcopy(self.models['Ground_neus'].color_network)
-        # self.models['Color_network'] = self.color_network
-        
-        # TODO enbale training
-        # self.models['Color_network'].eval()
-        # for param in self.models['Color_network'].parameters():
-        #     param.requires_grad = False
         
         # sdf model
         self.models['Ground_gs'].sdf_network = self.models['Ground'].sdf_network
         self.models['Ground_gs'].scale_mat = self.scale_mat.cuda()
         self.models['Ground_gs'].omnire_w2neus_w = self.omnire_w2neus_w.cuda()
+        print(f"Converted neus to 2dgs: num_points: {points.shape[0]}")
 
-        # TODO 测试 SDF 的normal输出
-        # points_in_neus = (points  + self.omnire_w2neus_w.cuda()[:3, 3]) @ torch.linalg.inv(self.scale_mat[:3, :3]).cuda()
-        # normal = self.models['SDF'].gradient_normal(points_in_neus)
-        # normal = normal @ self.scale_mat[:3, :3].cuda()
-        # normal = normal.squeeze()
-        # normal = normal / normal.norm(dim=-1, keepdim=True)
-        # import open3d as o3d
-        # pcd = o3d.geometry.PointCloud()
-        # pcd.points = o3d.utility.Vector3dVector(points.detach().cpu().numpy())
-        # pcd.colors = o3d.utility.Vector3dVector(colors.cpu().numpy())
-        # pcd.normals = o3d.utility.Vector3dVector(normal.detach().cpu().numpy())
-        
-        # o3d.io.write_point_cloud("points.ply", pcd)
-        
-        
-        # self.models['SDF'].eval()
-        # for param in self.models['SDF'].parameters():
-        #     param.requires_grad = False
-        # del self.models['Ground']
         
     def register_normalized_timestamps(self, num_timestamps: int):
         self.normalized_timestamps = torch.linspace(0, 1, num_timestamps, device=self.device)
@@ -205,8 +176,41 @@ class MultiTrainer(BasicTrainer):
                 self.models['Ground'].pretrain_sdf_lidar(road_lidar_pts)
             else:
                 raise Exception("Not supported pretrain method: {}".format(pretrain_method))
-            
-            self.models['Ground'].validate_mesh()
+            # intialize NeuS
+            pretrain_iters = self.model_config['Ground'].get('pretrain_iters', 0)
+            if pretrain_iters > 0:
+                from tqdm import trange
+                t = trange(pretrain_iters, desc='pretrain road surface', leave=True)
+                for step in t:
+
+                    self.models['Ground'].iter_step = step
+
+                    image_infos, camera_infos = dataset.train_image_set.next(1)
+                    for k, v in image_infos.items():
+                        if isinstance(v, torch.Tensor):
+                            image_infos[k] = v.cuda(non_blocking=True)
+                    for k, v in camera_infos.items():
+                        if isinstance(v, torch.Tensor):
+                            camera_infos[k] = v.cuda(non_blocking=True)
+
+                    # forward & backward
+                    image_infos['is_train'] = self.training
+                    outputs = self.models['Ground'](image_infos, camera_infos)
+
+                    if step % 500 == 0:
+                        self.models['Ground'].validate_image(image_infos, camera_infos, step)
+                    
+                    loss_dict = self.models['Ground'].get_loss(outputs, image_infos, camera_infos)
+                    loss = sum(loss_dict.values())
+
+                    self.models['Ground'].optimizer.zero_grad()
+                    t.set_description(f"pretrain road surface, loss:{loss.item()}")
+                    t.refresh()
+                    loss.backward()
+                    self.models['Ground'].optimizer.step()
+            # self.models['Ground'].validate_mesh()
+            if self.ground_method == "rsg":
+                self.neus23dgs()
         # get instance points
         rigidnode_pts_dict, deformnode_pts_dict, smplnode_pts_dict = {}, {}, {}
         if "RigidNodes" in self.model_config:
@@ -258,7 +262,7 @@ class MultiTrainer(BasicTrainer):
                         random_pts.append(uniform_sample_sphere(num_near_pts, self.device))
                     num_far_pts = init_cfg.get('far_randoms', 0)
                     if num_far_pts > 0: # inverse distances uniformly from (0, 1 / scene_radius)
-                        num_far_pts *= 30
+                        num_far_pts *= 3
                         random_pts.append(uniform_sample_sphere(num_far_pts, self.device, inverse=True))
                     
                     if num_near_pts + num_far_pts > 0:
@@ -430,7 +434,7 @@ class MultiTrainer(BasicTrainer):
                     outputs['ground']['color_fine'], image_infos, camera_infos
                 )
         
-        if 'Ground_gs' in self.models.keys():
+        if 'Ground_gs' in self.models.keys() and self.ground_method == 'rsg':
             gs_ground, align_error = self.collect_gaussians(
                 cam=processed_cam,
                 image_ids=None,
@@ -455,7 +459,7 @@ class MultiTrainer(BasicTrainer):
                 outputs_ground['normal'] = outputs_ground['normal'] * image_infos['road_masks'].unsqueeze(-1)
                 outputs_ground['normal_from_depth'] = outputs_ground['normal_from_depth'] * image_infos['road_masks'].unsqueeze(-1)
             else:
-                outputs_ground['rgb_gaussians'] = outputs_ground['rgb_gaussians']
+                outputs_ground['rgb'] = outputs_ground['rgb_gaussians']
             outputs['ground_gs'] = outputs_ground
         
         # 渲染3dgs
@@ -481,10 +485,13 @@ class MultiTrainer(BasicTrainer):
         outputs["rgb_sky_blend"] = outputs["rgb_sky"] * (1.0 - outputs['3dgs']["opacity"])
         
         if self.ground_method == 'neus':
+            assert 'Ground' in self.models.keys()
             ground_outputs = outputs['ground']
         elif self.ground_method == 'rsg':
+            assert 'Ground_gs' in self.models.keys()
             ground_outputs = outputs['ground_gs']
-        
+        else:
+            raise Exception("Not supported ground method: {}".format(self.ground_method))
         # 合并渲染结果
         if 'Ground' in self.models.keys() and self.ground_method == 'neus':
             outputs['rgb'] = outputs['3dgs']["rgb_gaussians"] + (ground_outputs['rgb']) * (1.0 - outputs['3dgs']["opacity"]) + (torch.sigmoid(outputs['rgb_sky'])) * torch.clip((1.0 - outputs['3dgs']['opacity'] - ground_outputs['opacity']), 0, 1)

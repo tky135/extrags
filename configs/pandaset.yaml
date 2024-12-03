@@ -4,6 +4,7 @@ dataset: waymo/3cams
 # ------------- Trainer ------------ #
 trainer:
   type: models.trainers.MultiTrainer
+  ground_method: rsg
   optim:
     num_iters: 40000
     neus_iters: 10000
@@ -259,8 +260,21 @@ model:
   #     freeze_shs_rest: false
   Ground:
     type: models.modules.Ground
+    pretrain_method: lidar # [egopose, lidar]
+    pretrain_iters: 10000
     params:
+      batch_size: 32768
       resolution: 1024
+      render_full: True
+      losses: 
+        l1:
+          w: 1.
+        eikonal:
+          w: 1.
+        s_val:
+          w: 1.
+        delta_color:
+          w: 1.
     optim:
       all:
         lr: 5.0e-4

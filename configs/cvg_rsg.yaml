@@ -7,7 +7,7 @@ trainer:
   ground_method: rsg # [neus, rsg]
   optim:
     num_iters: 40000
-    lidar_pretrain_iters: 10000
+    lidar_pretrain_iters: 0
     use_grad_scaler: false
     cache_buffer_freq: -1 # we use error based image sampler for training with more than 3 cameras
   render:
@@ -27,11 +27,12 @@ trainer:
     mask:
       w: 0.5
       opacity_loss_type: bce # choose from [bce, safe_bce]
-    # consistency:
-    #   w: 0.1
-    #   start_iter: 10000
-    # distortion:
-    #   w: 0.1
+    normal_consistency:
+      w: 1.0
+    distortion:
+      w: 1.0
+    align_error:
+      w: 1e2
     # depth:
     #   w: 0.01 # weight of depth loss
     #   inverse_depth: False # whether to use inverse depth, NOTE that when set to True, must normalize=True
@@ -94,6 +95,7 @@ model:
         max_gauss_ratio: 10.       # threshold of ratio of gaussian max to min scale before applying regularization loss from the PhysGaussian paper
   Ground_gs:
     type: models.gaussians.VanillaGaussians
+    sdf_grad: False
     reg:
       sharp_shape_reg:
         w: 1.
@@ -273,10 +275,22 @@ model:
   #     freeze_s: false
   #     freeze_shs_dc: false
   #     freeze_shs_rest: false
-  Ground_neus:
+  Ground:
     type: models.modules.Ground
+    pretrain_method: egopose # [egopose, lidar]
+    pretrain_iters: 10000
     params:
+      batch_size: 8192
       resolution: 1024
+      losses: 
+        l1:
+          w: 1.
+        eikonal:
+          w: 0.162
+        s_val:
+          w: 1.
+        delta_color:
+          w: 0.05
     optim:
       all:
         lr: 5.0e-4

@@ -591,6 +591,9 @@ class BasicTrainer(nn.Module):
         image_infos: Dict[str, torch.Tensor],
         camera_infos: Dict[str, torch.Tensor]
         ):
+        if 'CameraEncod' in self.models:
+            rgb_blended_encoded = self.models['CameraEncod'](rgb_blended, camera_infos['cam_id'].flatten()[0])
+            return rgb_blended_encoded
         if "Affine" in self.models:
             affine_trs = self.models['Affine'](image_infos)
             if len(rgb_blended.shape) == 3:
@@ -696,7 +699,8 @@ class BasicTrainer(nn.Module):
             else:
                 valid_loss_mask = torch.ones((image_infos["viewdirs"].shape[0], image_infos['viewdirs'].shape[1]), device=self.device)
             # mask all dynamic objects
-            # valid_loss_mask *= (1.0 - image_infos['vehicle_masks']).float() * (1.0 - image_infos['human_masks']).float() * (1.0 - image_infos['dynamic_masks']).float()
+            if "multibag" in os.environ.get("DATASET"):
+                valid_loss_mask *= (1.0 - image_infos['vehicle_masks']).float() * (1.0 - image_infos['human_masks']).float() * (1.0 - image_infos['dynamic_masks']).float()
             gt_rgb = image_infos["pixels"] * valid_loss_mask[..., None]
             predicted_rgb = outputs["rgb"] * valid_loss_mask[..., None]
             

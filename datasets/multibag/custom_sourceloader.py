@@ -89,8 +89,8 @@ class CustomCameraData(CameraData):
 
         # get current cam timestamp
         Image_Pose_new_filtered_path = os.path.join(self.data_path, "Image_Pose_new_filtered.txt.json") 
-        Image_Pose_new_path = os.path.join(self.data_path, "Image_Pose_new.txt.json") 
-        self.image_pose_filtered_path = Image_Pose_new_filtered_path if os.path.exists(Image_Pose_new_filtered_path) else Image_Pose_new_path
+        # Image_Pose_new_path = os.path.join(self.data_path, "Image_Pose_new.txt.json") 
+        self.image_pose_filtered_path = Image_Pose_new_filtered_path# if os.path.exists(Image_Pose_new_filtered_path) else Image_Pose_new_path
 
         with open(self.image_pose_filtered_path, 'r') as f:
             image_pose_info = json.load(f)
@@ -118,7 +118,8 @@ class CustomCameraData(CameraData):
         self.load_images()
         self.load_egocar_mask()
         if load_dynamic_mask:
-            self.load_dynamic_masks()
+            self.load_seg_images()
+            # self.load_dynamic_masks()
         if load_sky_mask:
             self.load_sky_masks()
         # self.lidar_depth_maps = None # will be loaded by: self.load_depth()
@@ -134,7 +135,7 @@ class CustomCameraData(CameraData):
         e.g., img files, feature files, etc.
         """
         # ---- define filepaths ---- #
-        img_filepaths = []
+        img_filepaths, seg_filepaths = [], []
         dynamic_mask_filepaths, sky_mask_filepaths = [], []
         human_mask_filepaths, vehicle_mask_filepaths = [], []
         road_mask_filepaths = []
@@ -143,6 +144,11 @@ class CustomCameraData(CameraData):
         for t in self.timestamp_list:
             img_filepaths.append(
                 os.path.join(self.data_path, self.cam_name, 'keyframes', 'undist_images', f"{t}.jpg")
+            )
+            seg_filepaths.append(
+                os.path.join(
+                    os.path.join(self.data_path, self.cam_name, 'keyframes', 'seg_images', f"{t}.png")
+                )
             )
             dynamic_mask_filepaths.append(
                 os.path.join(
@@ -168,6 +174,7 @@ class CustomCameraData(CameraData):
                 os.path.join(self.data_path, self.cam_name, 'keyframes', 'seg_images', f"{t}.png")
             )
         self.img_filepaths = np.array(img_filepaths)
+        self.seg_filepaths = np.array(seg_filepaths)
         self.dynamic_mask_filepaths = np.array(dynamic_mask_filepaths)
         self.human_mask_filepaths = np.array(human_mask_filepaths)
         self.vehicle_mask_filepaths = np.array(vehicle_mask_filepaths)
@@ -178,6 +185,40 @@ class CustomCameraData(CameraData):
             calib_info = json.load(f)
         
         self.cam_height = calib_info['ground_vec'][1]
+
+    def load_seg_images(self):
+        seg_images = []
+        dynamic_masks, human_masks, vehicle_masks, road_masks = [], [], [], []
+        for ix, fname in tqdm(enumerate(self.seg_filepaths), desc="Loading seg images",
+            dynamic_ncols=True, total=len(self.seg_filepaths),
+        ):
+            label = Image.open(fname).resize(
+                (self.load_size[1], self.load_size[0]), Image.NEAREST
+            )
+            label = np.asarray(label)
+            seg_images.append(label)
+
+            dyn_mask = ((0 <= label) & (label <= 1)) | ((32 <= label) & (label <= 34)) | (105 == label) | ((109 <= label) & (label <= 120))
+            dyn_mask = Image.fromarray(dyn_mask * 255.).convert('L')
+            dynamic_masks.append(np.array(dyn_mask) > 0)
+
+            human_mask = ((30 <= label) & (label <= 31)) 
+            human_mask = Image.fromarray(human_mask * 255.).convert('L')
+            human_masks.append(np.array(human_mask) > 0)
+
+            vehicle_mask = ((106 <= label) & (label <= 110)) | ((112 <= label) & (label <= 115))
+            vehicle_mask = Image.fromarray(vehicle_mask * 255.).convert('L')
+            vehicle_masks.append(np.array(vehicle_mask) > 0)
+
+            road_mask = ((21 <= label) & (label <= 23)) | ((35 <= label) & (label <= 56)) | (label == 13) | (label == 14) | (label == 74)
+            road_mask = Image.fromarray(road_mask * 255.).convert('L')
+            road_masks.append(np.array(road_mask) > 0)
+
+        self.seg_images = torch.from_numpy(np.stack(seg_images, axis=0)).float()
+        self.dynamic_masks = torch.from_numpy(np.stack(dynamic_masks, axis=0)).float()
+        self.human_masks = torch.from_numpy(np.stack(human_masks, axis=0)).float()
+        self.vehicle_masks = torch.from_numpy(np.stack(vehicle_masks, axis=0)).float()
+        self.road_masks = torch.from_numpy(np.stack(road_masks, axis=0)).float()
 
     def load_egocar_mask(self):
         # compute egocar mask from hoodline
@@ -335,20 +376,22 @@ class CustomCameraData(CameraData):
 
         # for t in self.egopose_ts_dict:
         cam_to_worlds = []
+        ego_to_worlds = []
         for t in self.timestamp_list:
             ego_pose_wi_current = self.egopose_ts_dict[t]
             # compute ego_to_world transformation
             ego_to_world = np.linalg.inv(self.anchor_pose) @ ego_pose_wi_current
+            ego_to_worlds.append(ego_to_world)
             # transformation:
             #   (opencv_cam -> waymo_cam -> waymo_ego_vehicle) -> current_world
             cam2world = ego_to_world @ cam_to_ego
             cam_to_worlds.append(cam2world)
             intrinsics.append(_intrinsics)
             distortions.append(_distortions)
-
         self.intrinsics = torch.from_numpy(np.stack(intrinsics, axis=0)).float()
         self.distortions = torch.from_numpy(np.stack(distortions, axis=0)).float()
         self.cam_to_worlds = torch.from_numpy(np.stack(cam_to_worlds, axis=0)).float()
+        self.ego_to_wrolds = torch.from_numpy(np.stack(ego_to_worlds, axis=0)).float()
         self.calib_info = calib_info
 
     def load_depth(self):
@@ -629,7 +672,8 @@ class CustomLiDARSource(SceneLidarSource):
         center_list = interp_f_center(valid_ts_list)
 
         return valid_ts_list, qwc_list, center_list
-
+    def get_road_lidarpoints(self):
+        return self.lidar_loc_points_road
     def load_calibrations(self):
         pass
 
@@ -715,6 +759,7 @@ class CustomLiDARSource(SceneLidarSource):
         """
         Load the lidar data of the dataset from the filelist.
         """
+        
         lidar_loc_medb = tb.Medb(self.medb_path)
         lidar_loc_points_ecef = lidar_loc_medb.points()
         lidar_loc_colors = lidar_loc_medb.colors() / 255.
@@ -732,6 +777,28 @@ class CustomLiDARSource(SceneLidarSource):
 
         logger.info(
             f"Number of lidar rays: {len(self.lidar_loc_points)}"
+        )
+
+
+
+        lidar_loc_medb_road = tb.Medb(self.medb_path.replace("lidar_loc_points_colored_tree", "lidar_loc_points_colored_road"))
+        lidar_loc_points_ecef_road = lidar_loc_medb_road.points()
+        lidar_loc_colors_road = lidar_loc_medb_road.colors() / 255.
+
+        # convert ecef to anchor_pose
+        ecef2world = np.linalg.inv(self.anchor_pose)
+        lidar_loc_points_world_road = (
+            ecef2world[:3, :3] @ lidar_loc_points_ecef_road.T 
+            + ecef2world[:3, 3:4]
+        ).T 
+
+        # import ipdb; ipdb.set_trace()
+        self.lidar_loc_points_road = torch.tensor(lidar_loc_points_world_road).float()
+        self.colors_road = torch.tensor(lidar_loc_colors_road).float()
+        
+
+        logger.info(
+            f"Number of road lidar points: {len(self.lidar_loc_points_road)}"
         )
 
     def to(self, device: torch.device):

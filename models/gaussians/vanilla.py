@@ -116,6 +116,8 @@ class VanillaGaussians(nn.Module):
         self.device = device
         self.ball_gaussians=self.ctrl_cfg.get("ball_gaussians", False)
         self.gaussian_2d = self.ctrl_cfg.get("gaussian_2d", False)
+        if 'sdf_grad' in kwargs:
+            self.sdf_grad = kwargs['sdf_grad']
         
         # for evaluation
         self.in_test_set = False
@@ -412,7 +414,7 @@ class VanillaGaussians(nn.Module):
 
             # cull NOTE: Offset all the opacity reset logic by refine_every so that we don't
                 # save checkpoints right when the opacity is reset (saves every 2k)
-            if self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval) and not self.ground_gs:
+            if self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval):
                 deleted_mask = self.cull_gaussians()
                 param_groups = self.get_gaussian_param_groups()
                 remove_from_optim(optimizer, deleted_mask, param_groups)
@@ -421,7 +423,7 @@ class VanillaGaussians(nn.Module):
             print("number of lidar points: ", self.from_lidar.sum())
                     
             # reset opacity
-            if self.step % reset_interval == self.ctrl_cfg.refine_interval and self.step < self.ctrl_cfg.stop_split_at:
+            if self.step % reset_interval == self.ctrl_cfg.refine_interval and self.step < self.ctrl_cfg.stop_split_at and not self.ground_gs:
                 print("resetting opacity at step", self.step)
                 # NOTE: in nerfstudio, reset_value = cull_alpha_thresh * 0.8
                     # we align to original repo of gaussians spalting
@@ -446,12 +448,11 @@ class VanillaGaussians(nn.Module):
         n_bef = self.num_points
         # cull transparent ones
         culls = (self.get_opacity.data < self.ctrl_cfg.cull_alpha_thresh).squeeze()
-        if self.step > self.ctrl_cfg.reset_alpha_interval:
+        if self.step > self.ctrl_cfg.reset_alpha_interval or self.ground_gs:
             # cull huge ones
             if self.ground_gs:
                 toobigs = (
-                    torch.exp(self._scales).max(dim=-1).values > 
-                    self.ctrl_cfg.cull_scale_thresh * self.scene_scale / 10
+                    torch.exp(self._scales).max(dim=-1).values > 5
                 ).squeeze()
             else:
                 toobigs = (
@@ -467,6 +468,10 @@ class VanillaGaussians(nn.Module):
         # cull underground ones
         if self.under_ground is not None:
             culls = culls | self.under_ground.squeeze(-1)
+            
+        # only cull too bigs for ground_gs
+        if self.ground_gs:
+            culls = toobigs
         self._means = Parameter(self._means[~culls].detach())
         self._scales = Parameter(self._scales[~culls].detach())
         self._quats = Parameter(self._quats[~culls].detach())
@@ -703,7 +708,11 @@ class VanillaGaussians(nn.Module):
         if self.ground_gs:
             # 验证
             # self.sdf_network.sdf((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]))
-            elevation = self.sdf_network((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, :1] * 9
+            if self.sdf_grad:
+                elevation = self.sdf_network((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, :1] * 9
+            else:
+                with torch.no_grad():
+                    elevation = (self.sdf_network((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, :1] * 9).detach()
             output_means = torch.cat([output_means[:, :2], elevation], dim=-1)
             if self.step % 10 == 0:
                 normal_align_loss = 1 - torch.abs(torch.sum(self.quaternion_to_vector(activated_rotations[filter_mask]) * self.knn_normal(output_means[filter_mask]), dim=-1))
@@ -715,7 +724,7 @@ class VanillaGaussians(nn.Module):
                     _means=output_means[filter_mask],
                     _opacities=activated_opacities[filter_mask],
                     _rgbs=actovated_colors[filter_mask],
-                    _scales=activated_scales[filter_mask],
+                    _scales=activated_scales[filter_mask].clip(0, 0.05),
                     _quats=activated_rotations[filter_mask],
                     align_error=normal_align_loss,
                 )
@@ -770,7 +779,7 @@ class VanillaGaussians(nn.Module):
                 if self.gaussian_2d:
                     scale_exp = scale_exp[:, :2]
                     max_gauss_ratio = 5.0
-                scale_reg = torch.maximum(scale_exp.amax(dim=-1) / scale_exp.amin(dim=-1), torch.tensor(max_gauss_ratio)) - max_gauss_ratio
+                scale_reg = torch.maximum(scale_exp.amax(dim=-1) / (scale_exp.amin(dim=-1) + 1e-8), torch.tensor(max_gauss_ratio)) - max_gauss_ratio
                 scale_reg = scale_reg.mean() * w
                 loss_dict["sharp_shape_reg"] = scale_reg
 
@@ -783,7 +792,7 @@ class VanillaGaussians(nn.Module):
             loss_dict["flatten"] = flatten_loss * flatten_reg.w
         
         sparse_reg = self.reg_cfg.get("sparse_reg", None)
-        if sparse_reg and self.step > sparse_reg.start_step:
+        if sparse_reg and self.step > sparse_reg.start_step and self.ground_gs:
             if (self.cur_radii > 0).sum():
                 opacity = torch.sigmoid(self._opacities)
                 opacity = opacity.clamp(1e-6, 1-1e-6)
@@ -797,7 +806,13 @@ class VanillaGaussians(nn.Module):
         if max_s_square_reg is not None and not self.ball_gaussians:
             loss_dict["max_s_square"] = torch.mean((self.get_scaling.max(dim=1).values) ** 2) * max_s_square_reg.w
         return loss_dict
-    
+    def state_dict(self, sdf=False) -> Dict:
+        state_dict = super().state_dict()
+        if sdf:
+            with torch.no_grad():
+                elevation = (self.sdf_network((state_dict['_means'] + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, :1] * 9).detach()
+                state_dict['_means'][:, 2] = elevation.squeeze()
+        return state_dict
     def load_state_dict(self, state_dict: Dict, **kwargs) -> str:
         N = state_dict["_means"].shape[0]
         self._means = Parameter(torch.zeros((N,) + self._means.shape[1:], device=self.device))

@@ -728,11 +728,6 @@ class SDFNetwork_2d_hash(nn.Module):
             retain_graph=True,
             only_inputs=True)[0]
         return gradients.unsqueeze(1)
-    def get_param_groups(self):
-        return {
-            "Ground#"+"all": self.parameters(),
-        }
-    
     
     
     

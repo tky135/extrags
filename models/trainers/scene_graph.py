@@ -156,9 +156,16 @@ class MultiTrainer(BasicTrainer):
             pretrain_method = self.model_config['Ground'].get('pretrain_method')
             self.omnire_w2neus_w = self.models['Ground'].omnire_w2neus_w.to(dataset.pixel_source.camera_data[0].cam_to_worlds.device)
             self.cam_0_to_neus_world = self.omnire_w2neus_w @ dataset.pixel_source.camera_data[0].cam_to_worlds
-            self.ego_points = self.cam_0_to_neus_world[:, :3, 3]
-            self.ego_points[:, 2] -= self.cam_height
-            self.ego_normals = self.cam_0_to_neus_world[:, :3, :3] @ torch.tensor([0, -1, 0]).type(torch.float32).to(self.cam_0_to_neus_world.device)
+            if hasattr(dataset.pixel_source.camera_data[0], "ego_to_wrolds"):
+                self.ego_to_world = dataset.pixel_source.camera_data[0].ego_to_wrolds
+                self.ego_points = self.ego_to_world[:, :3, 3]
+                self.ego_normals = self.ego_to_world[:, :3, :3] @ torch.tensor([0, 0, 1]).type(torch.float32).to(self.ego_to_world.device)
+            else:
+                # TODO 错误的初始化方法
+                import ipdb ; ipdb.set_trace()
+                self.ego_points = self.cam_0_to_neus_world[:, :3, 3]
+                self.ego_points[:, 2] -= self.cam_height
+                self.ego_normals = self.cam_0_to_neus_world[:, :3, :3] @ torch.tensor([0, -1, 0]).type(torch.float32).to(self.cam_0_to_neus_world.device)
             self.models['Ground'].ego_points = self.ego_points.cpu().numpy()
             self.models['Ground'].ego_normals = self.ego_normals.cpu().numpy()
             self.scale_mat = self.models['Ground'].scale_mat
@@ -401,10 +408,10 @@ class MultiTrainer(BasicTrainer):
             outputs['ground'] = rgb_ground
             
             # 给采样的点用相同的affine transform
-            if 'color_fine' in outputs['ground'].keys():
-                outputs['ground']['color_fine'] = self.affine_transformation(
-                    outputs['ground']['color_fine'], image_infos, camera_infos
-                )
+            # if 'color_fine' in outputs['ground'].keys():
+            #     outputs['ground']['color_fine'] = self.affine_transformation(
+            #         outputs['ground']['color_fine'], image_infos, camera_infos
+            #     )
         
         if 'Ground_gs' in self.models.keys() and self.ground_method == 'rsg':
             gs_ground, align_error = self.collect_gaussians(

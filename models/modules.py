@@ -10,6 +10,7 @@ from pytorch3d.ops import knn_points
 import nvdiffrast.torch as dr
 from utils.geometry import rotation_6d_to_matrix
 from models.embedder import get_embedder_neus
+import tinycudann as tcnn
 # import wandb
 logger = logging.getLogger()
 
@@ -1482,26 +1483,24 @@ class Ground(nn.Module):
             color_error = (color_fine - true_rgb)
             color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='mean')
 
-            losses['neus/l1'] = color_fine_loss
+            losses['neus/l1'] = color_fine_loss * self.losses.l1.w
         
         if "eikonal" in self.losses:
             gradient_error = render_out['gradient_error']
-            bev_to_world_factor = 9 ** 2 / 500 ** 2
-            eikonal_loss = gradient_error * bev_to_world_factor
-            losses['neus/eikonal'] = eikonal_loss * self.igr_weight
+            losses['neus/eikonal'] = gradient_error * self.losses.eikonal.w
 
         
         if "delta_color" in self.losses:
             delta_color = render_out['delta_color']
             delta_color_loss = F.mse_loss(delta_color, torch.zeros_like(delta_color))
-            losses['neus/delta_color'] = delta_color_loss * 0.5
+            losses['neus/delta_color'] = delta_color_loss * self.losses.delta_color.w
             
         if "s_val" in self.losses:
             s_val = render_out['s_val']
             s_val_loss = s_val.mean()
             if torch.isnan(s_val_loss):
                 s_val_loss = torch.tensor(0.0, device=self.device)
-            losses['neus/s_val'] = s_val_loss
+            losses['neus/s_val'] = s_val_loss * self.losses.s_val.w
         return losses
     def backward(self, loss):
         self.optimizer.zero_grad()
@@ -1513,7 +1512,7 @@ class Ground(nn.Module):
         from sklearn.preprocessing import PolynomialFeatures
         from sklearn.linear_model import Ridge
         # extrapolate ego points
-        num_future_points = 20
+        num_future_points = 30
         n_points = self.ego_points.shape[0]
         time = np.arange(n_points).reshape(-1, 1)
         degree = 3
@@ -1639,3 +1638,34 @@ class Ground(nn.Module):
         return {
             "Ground#"+"all": self.parameters(),
         }
+
+
+class CameraEncod(nn.Module):
+    def __init__(self, class_name, n_camera, device, n: int):
+        super().__init__()
+        self.n_camera = n_camera
+        self.class_name = class_name
+        self.device = device
+        self.mlp = tcnn.Network(n_input_dims=3 + self.n_camera, n_output_dims=3, network_config={
+            "otype": "FullyFusedMLP",
+            "activation": "ReLU",
+            "output_activation": "None",
+            "n_neurons": 32,
+            "n_hidden_layers": 2
+        }).to(self.device)
+        
+    def forward(self, x, camera_idx):
+        assert x.shape[-1] == 3
+        orig_shape = x.shape
+        flat_x = x.view(-1, 3)
+        encod = torch.nn.functional.one_hot(camera_idx, num_classes=self.n_camera).expand(flat_x.shape[0], self.n_camera)
+        output_rgb = self.mlp(torch.cat([flat_x, encod], dim=-1)).view(orig_shape)
+        return output_rgb + x
+    
+    
+    def get_param_groups(self):
+        return {
+            
+            self.class_name + "#" + "all": self.parameters(),
+        }
+        

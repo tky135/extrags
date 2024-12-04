@@ -251,11 +251,11 @@ model:
         l1:
           w: 1.
         eikonal:
-          w: 1.
+          w: 0.162
         s_val:
           w: 1.
         delta_color:
-          w: 1.
+          w: 0.05
     optim:
       all:
         lr: 5.0e-4

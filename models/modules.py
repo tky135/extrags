@@ -269,7 +269,6 @@ class AffineTransform(nn.Module):
         }
     def load_state_dict(self, state_dict: Dict, **kwargs) -> str:
         # 对于测试数据，取前一个时间和后一个时间的平均值
-        raise Exception("Not implemented")
         embedding_weight = state_dict["embedding.weight"]
         for i in range(embedding_weight.shape[0]):
             if torch.norm(embedding_weight[i]) == 0:

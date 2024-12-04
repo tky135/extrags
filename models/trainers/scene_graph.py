@@ -148,6 +148,7 @@ class MultiTrainer(BasicTrainer):
     def init_gaussians_from_dataset(
         self,
         dataset: DrivingDataset,
+        fast_run: bool = False
     ) -> None:
 
         # Ground network initialization
@@ -162,7 +163,7 @@ class MultiTrainer(BasicTrainer):
                 self.ego_normals = self.ego_to_world[:, :3, :3] @ torch.tensor([0, 0, 1]).type(torch.float32).to(self.ego_to_world.device)
             else:
                 # TODO 错误的初始化方法
-                import ipdb ; ipdb.set_trace()
+                assert pretrain_method == "lidar"
                 self.ego_points = self.cam_0_to_neus_world[:, :3, 3]
                 self.ego_points[:, 2] -= self.cam_height
                 self.ego_normals = self.cam_0_to_neus_world[:, :3, :3] @ torch.tensor([0, -1, 0]).type(torch.float32).to(self.cam_0_to_neus_world.device)
@@ -171,20 +172,21 @@ class MultiTrainer(BasicTrainer):
             self.scale_mat = self.models['Ground'].scale_mat
             if type(self.scale_mat) != torch.Tensor:
                 self.scale_mat = torch.tensor(self.scale_mat).to(self.device)
-            if pretrain_method == 'egopose':
-                # ego pose + normal 初始化
-                self.models['Ground'].pretrain_sdf()
-                
-            elif pretrain_method == 'lidar':
-                # lidar 初始化
-                road_lidar_pts = dataset.lidar_source.get_road_lidarpoints()
-                
-                self.models['Ground'].pretrain_sdf_lidar(road_lidar_pts)
-            else:
-                raise Exception("Not supported pretrain method: {}".format(pretrain_method))
+            if not fast_run:
+                if pretrain_method == 'egopose':
+                    # ego pose + normal 初始化
+                    self.models['Ground'].pretrain_sdf()
+                    
+                elif pretrain_method == 'lidar':
+                    # lidar 初始化
+                    road_lidar_pts = dataset.lidar_source.get_road_lidarpoints()
+                    
+                    self.models['Ground'].pretrain_sdf_lidar(road_lidar_pts)
+                else:
+                    raise Exception("Not supported pretrain method: {}".format(pretrain_method))
             # intialize NeuS
             pretrain_iters = self.model_config['Ground'].get('pretrain_iters', 0)
-            if pretrain_iters > 0:
+            if pretrain_iters > 0 and not fast_run:
                 from tqdm import trange
                 t = trange(pretrain_iters, desc='pretrain road surface', leave=True)
                 for step in t:
@@ -381,6 +383,7 @@ class MultiTrainer(BasicTrainer):
                 novel_view=novel_view,
                 step=self.step
             )
+            camera_infos['camera_to_world'] = processed_cam.camtoworlds
         else:
             processed_cam = self.process_camera(    # 如果要对pose优化，或者perturb（TODO 为什么），在这里处理
                 camera_infos=camera_infos,
@@ -388,6 +391,7 @@ class MultiTrainer(BasicTrainer):
                 novel_view=novel_view,
                 step=self.step
             )
+            camera_infos['camera_to_world'] = processed_cam.camtoworlds
             
         # seperate camera model for neus
         c2w_neus = camera_infos['camera_to_world']

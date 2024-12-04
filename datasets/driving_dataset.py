@@ -82,7 +82,7 @@ class DrivingDataset(SceneDataset):
         #   PandaSet: 6 Cameras
         #   NuPlan:   8 Cameras
         self.type = self.data_cfg.dataset   # 'nuscenes'
-        if self.type in ['pandaset', 'kitti360']: # For Waymo, NuScenes, ArgoVerse, PandaSet
+        if self.type in ['pandaset', 'kitti360', 'waymo']: # For Waymo, NuScenes, ArgoVerse, PandaSet
             self.data_path = os.path.join(
                 self.data_cfg.data_root,    # 'data/nuscenes/processed_10Hz/mini'
                 f"{int(self.scene_idx):03d}"

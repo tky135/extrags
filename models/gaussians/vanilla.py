@@ -139,7 +139,7 @@ class VanillaGaussians(nn.Module):
         self._features_dc = torch.zeros(1, 3, device=self.device)
         self._features_rest = torch.zeros(1, num_sh_bases(self.sh_degree) - 1, 3, device=self.device)
         self.ground_gs = False
-        
+        self.clip_scale = kwargs.get("clip_scale", None)
     @property
     def sh_degree(self):
         return self.ctrl_cfg.sh_degree
@@ -724,7 +724,7 @@ class VanillaGaussians(nn.Module):
                     _means=output_means[filter_mask],
                     _opacities=activated_opacities[filter_mask],
                     _rgbs=actovated_colors[filter_mask],
-                    _scales=activated_scales[filter_mask].clip(0, 0.05),
+                    _scales=activated_scales[filter_mask].clip(0, self.clip_scale) if self.clip_scale is not None else activated_scales[filter_mask],
                     _quats=activated_rotations[filter_mask],
                     align_error=normal_align_loss,
                 )

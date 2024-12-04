@@ -11,7 +11,6 @@ trainer:
     use_grad_scaler: false
     cache_buffer_freq: -1 # we use error based image sampler for training with more than 3 cameras
   render:
-    render_ground: True
     near_plane: 0.1 # near plane for rendering
     far_plane: 10000000000.0 # far plane for rendering
     antialiased: false # whether to use antialiasing for gaussian rendering, supported by gsplat kernel
@@ -64,7 +63,7 @@ trainer:
     warmup_steps: 2000             # warmup steps for alpha
     reset_alpha_interval: 3000    # reset alpha every n steps
     refine_interval: 300          # refine gaussians every n steps
-    sh_degree_interval: 1000      # every n intervals turn on another sh degree
+    sh_degree_interval: 1000      # every n intervals turn on another sh degree # TODO adapt
     n_split_samples: 2            # number of samples to split gaussians into
     # may differ in different models
     reset_alpha_value: 0.01       # reset alpha to this value
@@ -96,6 +95,7 @@ model:
   Ground_gs:
     type: models.gaussians.VanillaGaussians
     sdf_grad: False
+    clip_scale: 0.05
     reg:
       sharp_shape_reg:
         w: 1.

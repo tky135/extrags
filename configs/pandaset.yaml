@@ -4,7 +4,7 @@ dataset: waymo/3cams
 # ------------- Trainer ------------ #
 trainer:
   type: models.trainers.MultiTrainer
-  ground_method: neus # [neus, rsg]
+  ground_method: rsg # [neus, rsg]
   optim:
     num_iters: 40000
     lidar_pretrain_iters: 0
@@ -98,6 +98,7 @@ model:
 # {'type': 'models.gaussians.VanillaGaussians', 'reg': {'sharp_shape_reg': {'w': 1.0, 'step_interval': 10, 'max_gauss_ratio': 10.0}}, 'optim': {'xyz': {'lr': 0.00064, 'lr_final': 1.6e-06, 'scale_factor': 'scene_radius'}, 'sh_dc': {'lr': 0.0025}, 'sh_rest': {'lr': 0.000125}, 'opacity': {'lr': 0.05}, 'scaling': {'lr': 0.005}, 'rotation': {'lr': 0.001}}, 'ctrl': {'warmup_steps': 2000, 'reset_alpha_interval': 3000, 'refine_interval': 300, 'sh_degree_interval': 1000, 'n_split_samples': 2, 'reset_alpha_value': 0.01, 'densify_grad_thresh': 0.0005, 'densify_size_thresh': 0.003, 'cull_alpha_thresh': 0.005, 'cull_scale_thresh': 0.5, 'cull_screen_size': 0.15, 'split_screen_size': 0.05, 'stop_screen_size_at': 14000, 'stop_split_at': 35000, 'sh_degree': 3}}
   Ground_gs:
     type: models.gaussians.VanillaGaussians
+    sdf_grad: True
     reg:
       sharp_shape_reg:
         w: 1.
@@ -275,11 +276,11 @@ model:
         l1:
           w: 1.
         eikonal:
-          w: 1.
+          w: 0.162
         s_val:
           w: 1.
         delta_color:
-          w: 1.
+          w: 0.05
     optim:
       all:
         lr: 5.0e-4
@@ -312,18 +313,18 @@ model:
       all:
         lr: 1.0e-5
         weight_decay: 1.0e-6
-  CamPose_ts_neus:
-    type: models.modules.CameraOptModule_ts
-    optim:
-      all:
-        lr: 1.0e-5
-        weight_decay: 1.0e-6
-  ExtrinsicPose_neus:
-    type: models.modules.ExtrinsicOptModule
-    optim:
-      all:
-        lr: 1.0e-5
-        weight_decay: 1.0e-6
+  # CamPose_ts_neus:
+  #   type: models.modules.CameraOptModule_ts
+  #   optim:
+  #     all:
+  #       lr: 1.0e-5
+  #       weight_decay: 1.0e-6
+  # ExtrinsicPose_neus:
+  #   type: models.modules.ExtrinsicOptModule
+  #   optim:
+  #     all:
+  #       lr: 1.0e-5
+  #       weight_decay: 1.0e-6
 
   # CamPose:
   #   type: models.modules.CameraOptModule
@@ -350,5 +351,5 @@ render:
 logging:
   vis_freq: 2000 # how often to visualize training stats
   print_freq: 500 # how often to print training stats
-  saveckpt_freq: 5000 # how often to save checkpoints
+  saveckpt_freq: 15000 # how often to save checkpoints
   save_seperate_video: True # whether to save seperate videos for each scene

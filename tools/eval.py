@@ -240,7 +240,7 @@ def main(args):
         scene_aabb=dataset.get_aabb().reshape(2, 3),
         device=device
     )
-    
+    trainer.init_gaussians_from_dataset(dataset, fast_run=True)
     # Resume from checkpoint
     trainer.resume_from_checkpoint(
         ckpt_path=args.resume_from,

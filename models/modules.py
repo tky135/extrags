@@ -180,17 +180,20 @@ class EnvLight(torch.nn.Module):
         class_name: str,
         resolution=1024,
         device: torch.device = torch.device("cuda"),
-        **kwargs
+        n_bags: int = 1,
     ):
         super().__init__()
         self.class_prefix = class_name + "#"
         self.device = device
         self.to_opengl = torch.tensor([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=torch.float32, device="cuda")
-        self.base = torch.nn.Parameter(
+        self.n_bags = n_bags
+        self.bases = [torch.nn.Parameter(
             0.5 * torch.ones(6, resolution, resolution, 3, requires_grad=True),
-        )
+        ) for _ in range(self.n_bags)]
+        self.bases = torch.nn.ParameterList(self.bases)
         
-    def forward(self, image_infos):
+        
+    def forward(self, image_infos, camera_infos):
         l = image_infos["viewdirs"]
         
         l = (l.reshape(-1, 3) @ self.to_opengl.T).reshape(*l.shape)
@@ -198,8 +201,8 @@ class EnvLight(torch.nn.Module):
         prefix = l.shape[:-1]
         if len(prefix) != 3:  # reshape to [B, H, W, -1]
             l = l.reshape(1, 1, -1, l.shape[-1])
-
-        light = dr.texture(self.base[None, ...], l, filter_mode='linear', boundary_mode='cube')
+        bag_id = camera_infos['bag_id']
+        light = dr.texture(self.bases[bag_id][None, ...], l, filter_mode='linear', boundary_mode='cube')
         light = light.view(*prefix, -1)
 
         return light
@@ -269,6 +272,7 @@ class AffineTransform(nn.Module):
         }
     def load_state_dict(self, state_dict: Dict, **kwargs) -> str:
         # 对于测试数据，取前一个时间和后一个时间的平均值
+        return
         embedding_weight = state_dict["embedding.weight"]
         for i in range(embedding_weight.shape[0]):
             if torch.norm(embedding_weight[i]) == 0:
@@ -873,7 +877,7 @@ import cv2
 idx2color = [[157, 234, 50], [211, 211, 202], [233, 74, 127], [85, 37, 136], [250, 220, 2], [157, 234, 50]]
 
 class Ground(nn.Module):
-    def __init__(self, log_dir, dataset, ground_config, render_full):
+    def __init__(self, log_dir, dataset, ground_config, render_full, **kwargs):
         super(Ground, self).__init__()
         # initialize everything model
         
@@ -1476,6 +1480,8 @@ class Ground(nn.Module):
         # image_batch_size, batch_size = H, W
         
         losses = {}
+        if self.losses is None:
+            self.losses = []
         
         if "l1" in self.losses:
             color_fine = render_out['color_fine']
@@ -1506,7 +1512,7 @@ class Ground(nn.Module):
         loss.backward()
         self.optimizer.step()
     
-    def validate_mesh(self, cluster_idx=0):
+    def validate_mesh(self, cluster_idx=0, output=False, radius_overwrite=None, gridsize_overwrite=None):
         from sklearn.linear_model import LinearRegression
         from sklearn.preprocessing import PolynomialFeatures
         from sklearn.linear_model import Ridge
@@ -1528,7 +1534,16 @@ class Ground(nn.Module):
             extrapolated_points.append(future_values)
         extrapolated_points = np.column_stack(extrapolated_points)
         extrapolated_ego_points = np.vstack((self.ego_points, extrapolated_points))
-        xy = torch.meshgrid(torch.arange(-1, 1, 0.1 / self.scale_mat[0, 0], device=torch.device("cpu")), torch.arange(-1, 1, 0.1 / self.scale_mat[1, 1], device=torch.device("cpu")))
+        if "multibag" in os.environ.get("DATASET"):
+            extrapolated_ego_points = self.ego_points[:300]
+        if not output:
+            xy = torch.meshgrid(torch.arange(-1, 1, 0.1 / self.scale_mat[0, 0], device=torch.device("cpu")), torch.arange(-1, 1, 0.1 / self.scale_mat[1, 1], device=torch.device("cpu")))
+        else:
+            xy = torch.meshgrid(torch.arange(-1, 1, 0.03 / self.scale_mat[0, 0], device=torch.device("cpu")), torch.arange(-1, 1, 0.03 / self.scale_mat[1, 1], device=torch.device("cpu")))
+        
+        if gridsize_overwrite is not None:
+            xy = torch.meshgrid(torch.arange(-1, 1, gridsize_overwrite / self.scale_mat[0, 0], device=torch.device("cpu")), torch.arange(-1, 1, gridsize_overwrite / self.scale_mat[1, 1], device=torch.device("cpu")))
+            
         xy_grid = torch.stack([xy[0], xy[1]], dim=-1)
         num_pixels = xy_grid.shape[0]
         canvas = np.zeros([num_pixels, num_pixels], dtype=np.uint8)
@@ -1549,10 +1564,12 @@ class Ground(nn.Module):
         xy_world = xy @ torch.from_numpy(self.scale_mat[:2, :2]).cuda() + torch.from_numpy(self.scale_mat[:2, 3]).cuda()
         mask_xy = torch.zeros(xy_world.shape[0], dtype=torch.bool, device=xy_world.device)
 
+
+        radius = 10 if radius_overwrite is None else radius_overwrite
         for i in tqdm(range(len(extrapolated_ego_points)), desc='Filtering'):
             x, y, _ = extrapolated_ego_points[i]
             dist = torch.norm(xy_world - torch.tensor([x, y], dtype=torch.float32, device=xy_world.device), dim=-1)
-            mask = dist < 15
+            mask = dist < radius
             mask_xy = mask_xy | mask
         xy = xy[mask_xy]
         
@@ -1668,3 +1685,45 @@ class CameraEncod(nn.Module):
             self.class_name + "#" + "all": self.parameters(),
         }
         
+class CameraEncodwBag(nn.Module):
+    def __init__(self, class_name, n_camera, device, n_bags: int, **kwargs):
+        super().__init__()
+        self.n_camera = n_camera
+        self.class_name = class_name
+        self.device = device
+        self.n_bags = n_bags
+        # self.mlp = tcnn.Network(n_input_dims=3 + self.n_camera + 3, n_output_dims=3, network_config={
+        #     "otype": "FullyFusedMLP",
+        #     "activation": "ReLU",
+        #     "output_activation": "None",
+        #     "n_neurons": 32,
+        #     "n_hidden_layers": 2
+        # }).to(self.device)
+        
+        self.fourier_emb, outdim = get_embedder_neus(multires=4, input_dims=3)
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(outdim + self.n_camera + self.n_bags, 32),
+            torch.nn.LeakyReLU(),
+            torch.nn.Linear(32, 32),
+            torch.nn.LeakyReLU(),
+            torch.nn.Linear(32, 3)
+        ).to(self.device)
+        
+
+    def forward(self, x, camera_idx, bag_idx):
+        assert x.shape[-1] == 3
+        if type(bag_idx) == int:
+            bag_idx = torch.tensor(bag_idx, device=self.device)
+        if type(camera_idx) == int:
+            camera_idx = torch.tensor(camera_idx, device=self.device)
+        orig_shape = x.shape
+        flat_x = x.view(-1, 3)
+        encod = torch.nn.functional.one_hot(camera_idx, num_classes=self.n_camera).expand(flat_x.shape[0], self.n_camera)
+        bag_encod = torch.nn.functional.one_hot(bag_idx, num_classes=self.n_bags).expand(flat_x.shape[0], self.n_bags)
+        output_rgb = self.mlp(torch.cat([self.fourier_emb(flat_x), encod, bag_encod], dim=-1)).view(orig_shape)
+        return output_rgb + x
+    def get_param_groups(self):
+        return {
+            
+            self.class_name + "#" + "all": self.parameters(),
+        }

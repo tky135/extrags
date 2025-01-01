@@ -553,6 +553,25 @@ class SDFNetwork_2d_hash(nn.Module):
             # torch.nn.ReLU(),
             # torch.nn.Linear(128, 65)
         ) for i in range(self.num_clusters)])
+        
+        
+        # self.quat_mlp = nn.Sequential(
+        #     torch.nn.Linear(self.hash_encoding[0].n_output_dims, 64), 
+        #     torch.nn.Sigmoid(),
+        #     torch.nn.Linear(64, 4)
+        # )
+        
+        self.quat_mlp_prior = tcnn.NetworkWithInputEncoding(n_input_dims=2, n_output_dims=4, network_config={
+            "otype": "FullyFusedMLP",
+            "activation": "Sigmoid",
+            "output_activation": "None",
+            "n_neurons": 64,
+            "n_hidden_layers": 2
+        }, encoding_config={
+            "otype": "Frequency", 
+            "n_frequencies": 3
+        })
+        
     #     self.mlp = tcnn.NetworkWithInputEncoding(n_input_dims=2, n_output_dims=257, encoding_config={
 	# 	"otype": "HashGrid",
 	# 	"n_levels": 16,
@@ -603,6 +622,18 @@ class SDFNetwork_2d_hash(nn.Module):
         }) for _ in range(self.num_clusters)])
         # print(self.mlp)
         # raise Exception
+    
+    def get_quat(self, inputs):
+        x = inputs[:, :2].detach()
+        # x = self.hash_encoding[0](x / 30 + 0.5)
+        # x = self.quat_mlp(x.float())
+        # x = torch.cat([x[:, :3], torch.zeros_like(x[:, 3:])], dim=-1)
+        # x = torch.nn.functional.normalize(x, p=2, dim=-1)
+        x = self.quat_mlp_prior(x).float()
+        
+        x = torch.cat([x[:, :3], torch.zeros_like(x[:, 3:])], dim=-1)
+        x = torch.nn.functional.normalize(x, p=2, dim=-1)
+        return x
     
     
     def forward(self, inputs, output_height=False, delta=True, gradient=False, force_cluster=None, normal=False):

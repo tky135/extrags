@@ -26,26 +26,27 @@ trainer:
     mask:
       w: 0.5
       opacity_loss_type: bce # choose from [bce, safe_bce]
-    depth:
-      w: 0.01 # weight of depth loss
-      inverse_depth: False # whether to use inverse depth, NOTE that when set to True, must normalize=True
-      normalize: False # whether to normalize depth loss
-      loss_type: l1 # choose from ["l1", "l2"]
-      lidar_w_decay: 1.0
-    affine:
-      w: 0.00001 # weight of affine regularization
     normal_consistency:
       w: 0.1
     distortion:
       w: 0.1
     align_error:
-      w: 1e2
+      w: 0.0
+    # depth:
+    #   w: 0.01 # weight of depth loss
+    #   inverse_depth: False # whether to use inverse depth, NOTE that when set to True, must normalize=True
+    #   normalize: False # whether to normalize depth loss
+    #   loss_type: l1 # choose from ["l1", "l2"]
+    #   lidar_w_decay: 1.0
+    affine:
+      w: 0.00001 # weight of affine regularization
+    
   res_schedule:
     double_steps: 250 # training starts at 1/d resolution, every n steps this is doubled
     downscale_times: 2 # at the beginning, resolution is 1/2^d, where d is this number
   gaussian_optim_general_cfg:
     xyz:
-      lr: 6.4e-04
+      lr: 1.6e-04
       lr_final: 1.6e-06
       scale_factor: scene_radius # str or float, if "scene_scale", scale the learning rate by the scene scale
     sh_dc:
@@ -98,19 +99,25 @@ model:
 # {'type': 'models.gaussians.VanillaGaussians', 'reg': {'sharp_shape_reg': {'w': 1.0, 'step_interval': 10, 'max_gauss_ratio': 10.0}}, 'optim': {'xyz': {'lr': 0.00064, 'lr_final': 1.6e-06, 'scale_factor': 'scene_radius'}, 'sh_dc': {'lr': 0.0025}, 'sh_rest': {'lr': 0.000125}, 'opacity': {'lr': 0.05}, 'scaling': {'lr': 0.005}, 'rotation': {'lr': 0.001}}, 'ctrl': {'warmup_steps': 2000, 'reset_alpha_interval': 3000, 'refine_interval': 300, 'sh_degree_interval': 1000, 'n_split_samples': 2, 'reset_alpha_value': 0.01, 'densify_grad_thresh': 0.0005, 'densify_size_thresh': 0.003, 'cull_alpha_thresh': 0.005, 'cull_scale_thresh': 0.5, 'cull_screen_size': 0.15, 'split_screen_size': 0.05, 'stop_screen_size_at': 14000, 'stop_split_at': 35000, 'sh_degree': 3}}
   Ground_gs:
     type: models.gaussians.VanillaGaussians
-    sdf_grad: True
+    sdf_grad: False
+    query_rgb: True
+    query_quat: True
+    
+    clip_scale: 0.05
     reg:
       sharp_shape_reg:
         w: 1.
         step_interval: 10
         max_gauss_ratio: 5.
+      max_s_square_reg:
+        w: 0.1
     optim:
       xyz:
         lr: 6.4e-04
         lr_final: 1.6e-06
-        scale_factor: 1.0
+        scale_factor: 10.0
     ctrl:
-      densify_grad_thresh: 0.0002
+      densify_grad_thresh: 0.00005
       cull_alpha_thresh: 0.005
       sh_degree: 1
       reset_alpha_interval: 50000

@@ -7,7 +7,8 @@
 #    3    left_camera        (1920, 1080)
 #    4    right_camera       (1920, 1080)
 #    5    back_camera        (1920, 1080)
-
+trainer:
+  n_camera: 1
 data:
   data_root: data/pandaset/processed # data root for the dataset
   dataset: pandaset # dataset type

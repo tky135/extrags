@@ -6,9 +6,10 @@ from datasets.driving_dataset import DrivingDataset
 from models.trainers.base import BasicTrainer, GSModelType
 from utils.misc import import_str
 from utils.geometry import uniform_sample_sphere
-from utility import visualize_depth_map, depth_to_rgb
+from utility import depth_to_rgb
 from warp import warp_image
 import os
+import numpy as np
 import torchvision
 logger = logging.getLogger()
 
@@ -21,7 +22,11 @@ class MultiTrainer(BasicTrainer):
         self.num_timesteps = num_timesteps
         self.log_dir = kwargs['log_dir']
         self.dataset = kwargs['dataset']
+        self.dataset_obj = kwargs['dataset_obj']
         self.ground_method = kwargs['ground_method']
+        self.n_camera = kwargs['n_camera']
+        
+        self.export_neus_2dgs = kwargs.get('export_neus_2dgs', False)
         
         if self.dataset == "nuscenes":
             self.cam_height = 1.51
@@ -43,16 +48,20 @@ class MultiTrainer(BasicTrainer):
         super().__init__(**kwargs)
         self.render_each_class = True
         
-    def neus23dgs(self):
+    def neus23dgs(self, output=False):
         if 'Ground' not in self.models.keys():
             return
 
-        points, colors = self.models['Ground'].validate_mesh()
+
+
+        # points, colors = self.models['Ground'].validate_mesh(output=output)
+        points, colors = self.models['Ground'].validate_mesh(radius_overwrite=10, gridsize_overwrite=0.05)
+        points_coarse, colors_coarse = self.models['Ground'].validate_mesh(radius_overwrite=40, gridsize_overwrite=0.2)
+        
+        points = np.concatenate([points_coarse, points], axis=0)
+        colors = np.concatenate([colors_coarse, colors], axis=0)
         points = torch.from_numpy(points).to(self.device)
         colors = torch.from_numpy(colors).to(self.device)
-        
-        ground_gs_cfg = self.gaussian_ctrl_general_cfg
-        ground_gs_cfg['sh_degree'] = 3
         
         # ground_gs_model = import_str(self.model_config['Background']['type'])(class_name='Ground_gs', ctrl=ground_gs_cfg, reg=self.models['Background'].reg_cfg)
         self.models['Ground_gs'].ground_gs = True
@@ -60,8 +69,7 @@ class MultiTrainer(BasicTrainer):
         # points[:, 2] -= self.models['Ground'].cam_height
         points = (points - self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.omnire_w2neus_w[:3, :3].cuda()).T 
         from_lidar = torch.zeros_like(points[:, 0]).float()
-        self.models['Ground_gs'].create_from_pcd(init_means=points, init_colors=colors, from_lidar=from_lidar, init_opacity=0.5)
-        self.gaussian_classes['Ground_gs'] = GSModelType.Ground_gs
+        self.models['Ground_gs'].create_from_pcd(init_means=points, init_colors=colors, from_lidar=from_lidar, init_opacity=1.0)
         
         # sdf model
         self.models['Ground_gs'].sdf_network = self.models['Ground'].sdf_network
@@ -100,7 +108,20 @@ class MultiTrainer(BasicTrainer):
                     num_train_images=self.num_train_images,
                     device=self.device
                 )
-                
+            elif class_name in ['Sky']:
+                model = import_str(model_cfg.type)(
+                    class_name=class_name,
+                    **model_cfg.get('params', {}),
+                    n_bags = self.dataset_obj.pixel_source.num_cams // self.n_camera,
+                    device=self.device
+                ).to(self.device)
+            elif class_name in ['CameraEncod']:
+                model = import_str(model_cfg.type)(
+                    class_name=class_name,
+                    **model_cfg.get('params', {}),
+                    n_bags=self.dataset_obj.pixel_source.num_cams // self.n_camera,
+                    device=self.device
+                ).to(self.device)
             elif class_name in self.misc_classes_keys:
                 model = import_str(model_cfg.type)(
                     class_name=class_name,
@@ -158,9 +179,23 @@ class MultiTrainer(BasicTrainer):
             self.omnire_w2neus_w = self.models['Ground'].omnire_w2neus_w.to(dataset.pixel_source.camera_data[0].cam_to_worlds.device)
             self.cam_0_to_neus_world = self.omnire_w2neus_w @ dataset.pixel_source.camera_data[0].cam_to_worlds
             if hasattr(dataset.pixel_source.camera_data[0], "ego_to_wrolds"):
-                self.ego_to_world = dataset.pixel_source.camera_data[0].ego_to_wrolds
-                self.ego_points = self.ego_to_world[:, :3, 3]
-                self.ego_normals = self.ego_to_world[:, :3, :3] @ torch.tensor([0, 0, 1]).type(torch.float32).to(self.ego_to_world.device)
+                assert 'multibag' in os.environ.get("DATASET")
+                self.ego_to_neus_world = []
+                self.num_bags = 0
+                self.num_cameras = len(dataset.pixel_source.camera_data)
+                for cam_idx in dataset.pixel_source.camera_data:
+                    if cam_idx % len(dataset.pixel_source.camera_list) != 1:
+                        continue
+                    cam_data = dataset.pixel_source.camera_data[cam_idx]
+                    calib_info = cam_data.calib_info
+                    cam_to_worlds = self.omnire_w2neus_w @ cam_data.cam_to_worlds
+                    ego_to_cam = torch.tensor(np.array(calib_info['Tci']['data'], dtype=np.float32).reshape(calib_info['Tci']['rows'], -1)).to(cam_to_worlds.device)
+                    ego_to_worlds = cam_to_worlds @ ego_to_cam[None, ...]
+                    self.ego_to_neus_world.append(ego_to_worlds)
+                    self.num_bags += 1
+                self.ego_to_neus_world = torch.cat(self.ego_to_neus_world, dim = 0)
+                self.ego_points = self.ego_to_neus_world[:, :3, 3]
+                self.ego_normals = self.ego_to_neus_world[:, :3, :3] @ torch.tensor([0, 0, 1]).type(torch.float32).to(self.ego_to_neus_world.device)
             else:
                 # TODO 错误的初始化方法
                 assert pretrain_method == "lidar"
@@ -186,20 +221,26 @@ class MultiTrainer(BasicTrainer):
                     raise Exception("Not supported pretrain method: {}".format(pretrain_method))
             # intialize NeuS
             pretrain_iters = self.model_config['Ground'].get('pretrain_iters', 0)
+
+            # config dataset
+            dataset.train_image_set.mode = "random"
+            dataset.train_image_set.camera_downscale = 1.0
+            pretrainit = dataset.train_image_set.get_iterator(num_workers=4, prefetch_factor=2)
             if pretrain_iters > 0 and not fast_run:
                 from tqdm import trange
                 t = trange(pretrain_iters, desc='pretrain road surface', leave=True)
                 for step in t:
 
                     self.models['Ground'].iter_step = step
+                    
 
-                    image_infos, camera_infos = dataset.train_image_set.next(1)
+                    image_infos, camera_infos = next(pretrainit)
                     for k, v in image_infos.items():
                         if isinstance(v, torch.Tensor):
-                            image_infos[k] = v.cuda(non_blocking=True)
+                            image_infos[k] = v[0].cuda(non_blocking=True)
                     for k, v in camera_infos.items():
                         if isinstance(v, torch.Tensor):
-                            camera_infos[k] = v.cuda(non_blocking=True)
+                            camera_infos[k] = v[0].cuda(non_blocking=True)
 
                     # forward & backward
                     image_infos['is_train'] = self.training
@@ -217,7 +258,7 @@ class MultiTrainer(BasicTrainer):
                     loss.backward()
                     self.models['Ground'].optimizer.step()
             # self.models['Ground'].validate_mesh()
-            if self.ground_method == "rsg":
+            if "Ground_gs" in self.models.keys():
                 self.neus23dgs()
         # get instance points
         rigidnode_pts_dict, deformnode_pts_dict, smplnode_pts_dict = {}, {}, {}
@@ -412,10 +453,10 @@ class MultiTrainer(BasicTrainer):
             outputs['ground'] = rgb_ground
             
             # 给采样的点用相同的affine transform
-            # if 'color_fine' in outputs['ground'].keys():
-            #     outputs['ground']['color_fine'] = self.affine_transformation(
-            #         outputs['ground']['color_fine'], image_infos, camera_infos
-            #     )
+            if 'color_fine' in outputs['ground'].keys():
+                outputs['ground']['color_fine'] = self.affine_transformation(
+                    outputs['ground']['color_fine'], image_infos, camera_infos
+                )
         
         if 'Ground_gs' in self.models.keys() and self.ground_method == 'rsg':
             gs_ground, align_error = self.collect_gaussians(
@@ -464,7 +505,7 @@ class MultiTrainer(BasicTrainer):
         
         # render sky
         sky_model = self.models['Sky']
-        outputs["rgb_sky"] = sky_model(image_infos)
+        outputs["rgb_sky"] = sky_model(image_infos, camera_infos)
         outputs["rgb_sky_blend"] = outputs["rgb_sky"] * (1.0 - outputs['3dgs']["opacity"])
         
         if self.ground_method == 'neus':
@@ -490,7 +531,7 @@ class MultiTrainer(BasicTrainer):
             image_infos['before_affine'] = before_affine
             image_infos['after_affine'] = after_affine
         elif 'Ground_gs' in self.models.keys() and self.ground_method == 'rsg':
-            outputs['rgb'] = outputs['3dgs']['rgb_gaussians'] + (ground_outputs['rgb']) * (1.0 - outputs['3dgs']["opacity"]) + (outputs['rgb_sky']) * torch.clip((1.0 - outputs['3dgs']['opacity']) * (1 - ground_outputs['opacity']), 0, 1)
+            outputs['rgb'] = outputs['3dgs']['rgb_gaussians'] + (ground_outputs['rgb']) * (1.0 - outputs['3dgs']["opacity"]) + (torch.sigmoid(outputs['rgb_sky'])) * torch.clip((1.0 - outputs['3dgs']['opacity']) * (1 - ground_outputs['opacity']), 0, 1)
             before_affine = outputs['rgb'].detach()
             outputs["rgb"] = self.affine_transformation(
                 outputs['rgb'], image_infos, camera_infos
@@ -580,7 +621,7 @@ class MultiTrainer(BasicTrainer):
             image_infos['depth_blend'] = depth_blend_vis
             image_infos['depth_gt'] = depth_gt_vis
             self.models['Ground'].validate_image(image_infos, camera_infos)
-            if self.step % 10000 == 0:
+            if self.step % 10000 == 0 and self.step > 0 and self.training:
                 self.models['Ground'].validate_mesh()
             
         if os.environ.get("DATASET") == "kitti360/4cams":
@@ -608,3 +649,39 @@ class MultiTrainer(BasicTrainer):
         metric_dict = super().compute_metrics(outputs, image_infos)
         
         return metric_dict
+    
+    
+    def export_ply(
+        self,
+        output_path="./point_cloud.ply",
+    ):
+        from plyfile import PlyData, PlyElement
+        all_attributes = []
+        for gs_name, gs_type in self.gaussian_classes.items():
+            if gs_name not in ['Background', 'Ground_gs']:
+                continue
+            gs_model = self.models[gs_name]
+            if gs_name == 'Ground_gs':
+                gs_model.do_update()
+            xyz = gs_model._means.detach().cpu().numpy()
+            N = xyz.shape[0]
+            normals = np.zeros_like(xyz)
+            f_dc = gs_model._features_dc.detach().contiguous().cpu().numpy()
+            f_rest = gs_model._features_rest.detach().contiguous().permute(0, 2, 1).cpu().numpy().reshape(N, -1)
+            f_rest = np.concatenate([f_rest, np.ones((f_rest.shape[0], 45 - f_rest.shape[1]))], axis=1)
+
+            opacities = gs_model._opacities.detach().cpu().numpy()
+            scale = gs_model._scales.detach().cpu().numpy()
+            if scale.shape[1] == 2:
+                scale = np.concatenate([scale, np.ones_like(scale[:, :1]) * (-1e8)], axis=1)
+            rotation = gs_model.get_quats.detach().cpu().numpy()
+
+            attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+            all_attributes.append(attributes)
+        all_attributes = np.concatenate(all_attributes, axis=0)
+        dtype_full = [(attribute, 'f4') for attribute in self.models['Background'].construct_list_of_attributes()]
+
+        elements = np.empty(all_attributes.shape[0], dtype=dtype_full)
+        elements[:] = list(map(tuple, all_attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(output_path)

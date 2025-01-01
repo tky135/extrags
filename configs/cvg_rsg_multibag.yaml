@@ -8,8 +8,7 @@ trainer:
   n_camera: 7
   export_neus_2dgs: True
   optim:
-    num_iters: 50000
-    cont_num_iters_start: 40000
+    num_iters: 60000
     lidar_pretrain_iters: 0
     use_grad_scaler: false
     cache_buffer_freq: -1 # we use error based image sampler for training with more than 3 cameras
@@ -63,10 +62,10 @@ trainer:
     rotation:
       lr: 0.001
   gaussian_ctrl_general_cfg:
-    warmup_steps: 2000             # warmup steps for alpha
-    reset_alpha_interval: 3000    # reset alpha every n steps
+    warmup_steps: 10000             # warmup steps for alpha
+    reset_alpha_interval: 9000    # reset alpha every n steps
     refine_interval: 300          # refine gaussians every n steps
-    sh_degree_interval: 1000      # every n intervals turn on another sh degree # TODO adapt
+    sh_degree_interval: 1000      # every n intervals turn on another sh degree
     n_split_samples: 2            # number of samples to split gaussians into
     # may differ in different models
     reset_alpha_value: 0.01       # reset alpha to this value
@@ -76,8 +75,8 @@ trainer:
     cull_scale_thresh: 0.5        # threshold of scale for culling gaussians
     cull_screen_size: 0.15        # if a gaussian is more than this percent of screen space, cull it
     split_screen_size: 0.05       # if a gaussian is more than this percent of screen space, split it
-    stop_screen_size_at: 14000     # stop culling/splitting at this step WRT screen size of gaussians
-    stop_split_at: 35000          # stop splitting at this step
+    stop_screen_size_at: 10000     # stop culling/splitting at this step WRT screen size of gaussians
+    stop_split_at: 45000          # stop splitting at this step
     sh_degree: 3                  # sh degree for gaussians
 
 # ------------- Model ------------ #
@@ -100,7 +99,7 @@ model:
     gaussian_2d: True
     ground_gs: True
     sdf_grad: False
-    clip_scale: 0.05
+    clip_scale: 0.1
     reg:
       sharp_shape_reg:
         w: 1.
@@ -199,5 +198,5 @@ render:
 logging:
   vis_freq: 2000 # how often to visualize training stats
   print_freq: 500 # how often to print training stats
-  saveckpt_freq: 20000 # how often to save checkpoints
+  saveckpt_freq: 15000 # how often to save checkpoints
   save_seperate_video: True # whether to save seperate videos for each scene

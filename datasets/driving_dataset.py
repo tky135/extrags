@@ -75,6 +75,7 @@ class DrivingDataset(SceneDataset):
         super().__init__(data_cfg)
         
         # AVAILABLE DATASETS:
+        #   Custom:   7 cameras
         #   Waymo:    5 Cameras
         #   KITTI:    2 Cameras
         #   NuScenes: 6 Cameras
@@ -650,17 +651,17 @@ class DrivingDataset(SceneDataset):
 
     def check_pts_visibility(self, pts_xyz):
         # filter out the lidar points that are not visible from the camera
-        pts_xyz = pts_xyz.to(self.device)
-        valid_mask = torch.zeros_like(pts_xyz[:, 0]).bool()
+        pts_xyz = pts_xyz.cuda()
+        valid_mask = torch.zeros_like(pts_xyz[:, 0]).bool().to(pts_xyz.device)
         # project lidar points to the image plane
         for cam in self.pixel_source.camera_data.values():
             for frame_idx in range(len(cam)):
                 intrinsic_4x4 = torch.nn.functional.pad(
                     cam.intrinsics[frame_idx], (0, 1, 0, 1)
-                )
+                ).cuda()
                 intrinsic_4x4[3, 3] = 1.0
                 lidar2img = (
-                    intrinsic_4x4 @ cam.cam_to_worlds[frame_idx].inverse()
+                    intrinsic_4x4 @ cam.cam_to_worlds[frame_idx].cuda().inverse()
                 )
                 projected_points = (
                     lidar2img[:3, :3] @ pts_xyz.T + lidar2img[:3, 3:4]
@@ -675,7 +676,7 @@ class DrivingDataset(SceneDataset):
                     & (depth > 0)
                 )
                 valid_mask = valid_mask | current_valid_mask
-        return valid_mask
+        return valid_mask.to(self.device)
 
     def split_train_test(self):
         
@@ -695,25 +696,27 @@ class DrivingDataset(SceneDataset):
             )
         else:
             test_timesteps = []
+        if self.type in ['multibag']:
             train_timesteps = np.array(
                 [i for i in range(self.num_img_timesteps) if i not in test_timesteps]
             )
-        logger.info(
-            f"Train timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[train_timesteps]}"
-        )
-        logger.info(
-            f"Test timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[test_timesteps]}"
-        )
+            logger.info(
+                f"Train timesteps: \n{self.pixel_source._timesteps}"
+            )
+            # logger.info(
+            #     f"Test timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[test_timesteps]}"
+            # )
 
         # propagate the train and test timesteps to the train and test indices
         train_indices, test_indices = [], []
+        cam_num = self.pixel_source.num_cams if self.type not in ['multibag'] else self.pixel_source.num_cams_per_bag
         for t in range(self.num_img_timesteps):
             if t in train_timesteps:
-                for cam in range(self.pixel_source.num_cams):
-                    train_indices.append(t * self.pixel_source.num_cams + cam)
+                for cam in range(cam_num):
+                    train_indices.append(t * cam_num + cam)
             elif t in test_timesteps:
-                for cam in range(self.pixel_source.num_cams):
-                    test_indices.append(t * self.pixel_source.num_cams + cam)
+                for cam in range(cam_num):
+                    test_indices.append(t * cam_num + cam)
         logger.info(f"Number of train indices: {len(train_indices)}")
         logger.info(f"Train indices: {train_indices}")
         logger.info(f"Number of test indices: {len(test_indices)}")

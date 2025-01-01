@@ -1,5 +1,6 @@
 # Custom dataset configuration
-
+trainer:
+  n_camera: 7
 data:
   data_root: /home/kaiyuan.tan/ # data root for the dataset
   dataset: multibag
@@ -34,6 +35,3 @@ data:
     # 2) compute aabb from the downsampled lidar points by using the percentile of lidar_percentiles 
     lidar_downsample_factor: 40 # downsample lidar by this factor to compute percentile
     lidar_percentile: 0.02  # percentile to compute aabb from lidar
-
-trainer:
-  ground_method: rsg

@@ -12,11 +12,7 @@ from datasets.driving_dataset import DrivingDataset
 from utils.misc import import_str
 from utils.logging import setup_logging
 from models.trainers import BasicTrainer
-from models.video_utils import (
-    render_images,
-    save_videos,
-    render_novel_views
-)
+from models.video_utils import render
 
 logger = logging.getLogger()
 current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -37,16 +33,36 @@ def do_evaluation(
     logger.info("Evaluating Pixels...")
     if dataset.test_image_set is not None and cfg.render.render_test:
         logger.info("Evaluating Test Set Pixels...")
-        render_results = render_images(
-            trainer=trainer,
+        if args.render_video_postfix is None:
+            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/test_set_{step}.mp4"
+        else:
+            video_output_pth = (
+                f"{cfg.log_dir}/videos{post_fix}/test_set_{step}_{args.render_video_postfix}.mp4"
+            )
+        if "multibag" in os.environ.get("DATASET"):
+            vis_timestamps = min(300, dataset.num_img_timesteps)
+            vis_indices = range(vis_timestamps * dataset.pixel_source.num_cams_per_bag)
+        else:
+            vis_indices = None
+        metrics_dict = render(
             dataset=dataset.test_image_set,
+            trainer=trainer,
+            save_path=video_output_pth,
+            layout=dataset.layout,
+            num_timestamps=dataset.num_test_timesteps,
+            keys=render_keys,
+            num_cams=dataset.pixel_source.num_cams_per_bag if "multibag" in os.environ.get("DATASET") else dataset.pixel_source.num_cams,
+            save_images=True,
+            fps=cfg.render.fps,
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
+            vis_indices=vis_indices,
+            lane_shift=False,
         )
         
         if log_metrics:
             eval_dict = {}
-            for k, v in render_results.items():
+            for k, v in metrics_dict.items():
                 if k in [
                     "psnr",
                     "ssim",
@@ -68,44 +84,40 @@ def do_evaluation(
             with open(test_metrics_file, "w") as f:
                 json.dump(eval_dict, f)
             logger.info(f"Image evaluation metrics saved to {test_metrics_file}")
-
-        if args.render_video_postfix is None:
-            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/test_set_{step}.mp4"
-        else:
-            video_output_pth = (
-                f"{cfg.log_dir}/videos{post_fix}/test_set_{step}_{args.render_video_postfix}.mp4"
-            )
-        vis_frame_dict = save_videos(
-            render_results,
-            video_output_pth,
-            layout=dataset.layout,
-            num_timestamps=dataset.num_test_timesteps,
-            keys=render_keys,
-            num_cams=dataset.pixel_source.num_cams,
-            save_seperate_video=cfg.logging.save_seperate_video,
-            fps=2,
-            verbose=True,
-            save_images=True,
-            dataset=dataset
-        )
-        if args.enable_wandb:
-            for k, v in vis_frame_dict.items():
-                wandb.log({"image_rendering/test/" + k: wandb.Image(v)})
-        del render_results, vis_frame_dict
         torch.cuda.empty_cache()
         
     if cfg.render.render_full:
         logger.info("Evaluating Full Set...")
-        render_results = render_images(
-            trainer=trainer,
+        if args.render_video_postfix is None:
+            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/full_set_{step}.mp4"
+        else:
+            video_output_pth = (
+                f"{cfg.log_dir}/videos{post_fix}/full_set_{step}_{args.render_video_postfix}.mp4"
+            )
+        if "multibag" in os.environ.get("DATASET"):
+            vis_timestamps = min(300, dataset.num_img_timesteps)
+            vis_indices = range(vis_timestamps * dataset.pixel_source.num_cams_per_bag)
+        else:
+            vis_indices = None
+        metrics_dict = render(
             dataset=dataset.full_image_set,
+            trainer=trainer,
+            save_path=video_output_pth,
+            layout=dataset.layout,
+            num_timestamps=dataset.num_img_timesteps,
+            keys=render_keys,
+            num_cams=dataset.pixel_source.num_cams_per_bag if "multibag" in os.environ.get("DATASET") else dataset.pixel_source.num_cams,
+            save_images=True,
+            fps=cfg.render.fps,
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
+            vis_indices=vis_indices,
+            lane_shift=False,
         )
         
         if log_metrics:
             eval_dict = {}
-            for k, v in render_results.items():
+            for k, v in metrics_dict.items():
                 
                 if k in [
                     "psnr",
@@ -129,43 +141,41 @@ def do_evaluation(
                 json.dump(eval_dict, f)
             logger.info(f"Image evaluation metrics saved to {full_metrics_file}")
 
-        if args.render_video_postfix is None:
-            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/full_set_{step}.mp4"
-        else:
-            video_output_pth = (
-                f"{cfg.log_dir}/videos{post_fix}/full_set_{step}_{args.render_video_postfix}.mp4"
-            )
-        vis_frame_dict = save_videos(
-            render_results,
-            video_output_pth,
-            layout=dataset.layout,
-            num_timestamps=dataset.num_img_timesteps,
-            keys=render_keys,
-            num_cams=dataset.pixel_source.num_cams,
-            save_seperate_video=cfg.logging.save_seperate_video,
-            fps=cfg.render.fps,
-            verbose=True,
-        )
-        if args.enable_wandb:
-            for k, v in vis_frame_dict.items():
-                wandb.log({"image_rendering/full/" + k: wandb.Image(v)})
-        del render_results, vis_frame_dict
         torch.cuda.empty_cache()
     
     render_novel_cfg = cfg.render.get("render_novel", None)
     if render_novel_cfg is not None:
         logger.info("Rendering novel views...")
-        render_results = render_images(
-            trainer=trainer,
+        if "multibag" in os.environ.get("DATASET"):
+            vis_timestamps = min(300, dataset.num_img_timesteps)
+            vis_indices = range(vis_timestamps * dataset.pixel_source.num_cams_per_bag)
+        else:
+            vis_indices = None
+        if args.render_video_postfix is None:
+            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/shift_set_{step}.mp4"
+        else:
+            video_output_pth = (
+                f"{cfg.log_dir}/videos{post_fix}/shift_set_{step}_{args.render_video_postfix}.mp4"
+            )
+        metrics_dict = render(
             dataset=dataset.full_image_set,
+            trainer=trainer,
+            save_path=video_output_pth,
+            layout=dataset.layout,
+            num_timestamps=dataset.num_img_timesteps,
+            keys=render_keys,
+            num_cams=dataset.pixel_source.num_cams_per_bag if "multibag" in os.environ.get("DATASET") else dataset.pixel_source.num_cams,
+            save_images=True,
+            fps=cfg.render.fps,
             compute_metrics=True,
             compute_error_map=cfg.render.vis_error,
+            vis_indices=vis_indices,
             lane_shift=True,
         )
         
         if log_metrics:
             eval_dict = {}
-            for k, v in render_results.items():
+            for k, v in metrics_dict.items():
                 
                 if k in [
                     "psnr",
@@ -188,34 +198,16 @@ def do_evaluation(
             with open(shift_metrics_file, "w") as f:
                 json.dump(eval_dict, f)
             logger.info(f"Image evaluation metrics saved to {shift_metrics_file}")
-
-        if args.render_video_postfix is None:
-            video_output_pth = f"{cfg.log_dir}/videos{post_fix}/shift_set_{step}.mp4"
-        else:
-            video_output_pth = (
-                f"{cfg.log_dir}/videos{post_fix}/shift_set_{step}_{args.render_video_postfix}.mp4"
-            )
-        vis_frame_dict = save_videos(
-            render_results,
-            video_output_pth,
-            layout=dataset.layout,
-            num_timestamps=dataset.num_img_timesteps,
-            keys=render_keys,
-            num_cams=dataset.pixel_source.num_cams,
-            save_seperate_video=cfg.logging.save_seperate_video,
-            fps=cfg.render.fps,
-            verbose=True,
-            save_images=True,
-        )
-        if args.enable_wandb:
-            for k, v in vis_frame_dict.items():
-                wandb.log({"image_rendering/shift/" + k: wandb.Image(v)})
-        del render_results, vis_frame_dict
         torch.cuda.empty_cache()
 def main(args):
     log_dir = os.path.dirname(args.resume_from)
     cfg = OmegaConf.load(os.path.join(log_dir, "config.yaml"))
     cfg = OmegaConf.merge(cfg, OmegaConf.from_cli(args.opts))
+    export_neus_2dgs = cfg.trainer.export_neus_2dgs
+    os.environ.update({
+        "LOG_DIR": log_dir,
+        "DATASET": cfg.dataset,
+    })
     args.enable_wandb = False
     for folder in ["videos_eval", "metrics_eval"]:
         os.makedirs(os.path.join(log_dir, folder), exist_ok=True)
@@ -234,11 +226,12 @@ def main(args):
         **cfg.trainer,
         num_timesteps=dataset.num_img_timesteps,
         model_config=cfg.model,
-        num_train_images=len(dataset.train_image_set),
-        num_full_images=len(dataset.full_image_set),
+        num_train_images=len(dataset.train_image_set.split_indices),
+        num_full_images=len(dataset.full_image_set.split_indices),
         test_set_indices=dataset.test_timesteps,
         scene_aabb=dataset.get_aabb().reshape(2, 3),
-        device=device
+        device=device,
+        dataset_obj=dataset,
     )
     trainer.init_gaussians_from_dataset(dataset, fast_run=True)
     # Resume from checkpoint
@@ -250,6 +243,16 @@ def main(args):
         f"Resuming training from {args.resume_from}, starting at step {trainer.step}"
     )
     
+    # if export_neus_2dgs:
+    #     print("exporting neus to 2dgs")
+    #     # trainer.neus23dgs(output=True)
+    #     # trainer.ground_method = "rsg"
+    #     # trainer.save_checkpoint(
+    #     #         log_dir=cfg.log_dir,
+    #     #         save_only_model=True,
+    #     #         is_final=False,
+    #     #         ckpt_name="checkpoint_neus_2dgs",
+    #     #     )
     if args.enable_viewer:
         # a simple viewer for background visualization
         trainer.init_viewer(port=args.viewer_port)
@@ -258,20 +261,21 @@ def main(args):
     render_keys = [
         "gt_rgbs",
         "rgbs",
-        "Background_rgbs",
-        "RigidNodes_rgbs",
-        "DeformableNodes_rgbs",
-        "SMPLNodes_rgbs",
-        "depths",
-        "Background_depths",
+        # "Background_rgbs",
+        # "RigidNodes_rgbs",
+        # "DeformableNodes_rgbs",
+        # "SMPLNodes_rgbs",
+        # "depths",
+        # "Background_depths",
         # "RigidNodes_depths",
         # "DeformableNodes_depths",
         # "SMPLNodes_depths",
-        # "mask"
+        # "mask",
+        # "lidar_on_images",
+        # "rgb_sky_blend",
+        # "rgb_sky",
+        # "rgb_error_maps"
     ]
-    render_keys.insert(0, "lidar_on_images")
-    render_keys += ["rgb_sky_blend", "rgb_sky"]
-    render_keys.insert(render_keys.index("rgbs") + 1, "rgb_error_maps")
     
     if args.save_catted_videos:
         cfg.logging.save_seperate_video = False

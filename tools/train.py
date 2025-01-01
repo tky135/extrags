@@ -13,13 +13,13 @@ from tools.eval import do_evaluation
 from utils.misc import import_str
 from utils.backup import backup_project
 from utils.logging import MetricLogger, setup_logging
-from models.video_utils import render_images, save_videos
+from models.video_utils import render
 from datasets.driving_dataset import DrivingDataset
 
 logger = logging.getLogger()
 current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
 
-def set_seeds(seed=31):
+def set_seeds(seed=42):
     """
     Fix random seeds.
     """
@@ -36,7 +36,7 @@ def setup(args):
     
     # parse datasets
     args_from_cli = OmegaConf.from_cli(args.opts)
-    dataset_type = args_from_cli.pop("dataset")
+    dataset_type = args_from_cli.get("dataset")
     assert dataset_type is not None, "Please specify dataset type in cli"
         
     dataset_cfg = OmegaConf.load(
@@ -120,16 +120,18 @@ def main(args):
         **cfg.trainer,
         num_timesteps=dataset.num_img_timesteps,
         model_config=cfg.model,
-        num_train_images=len(dataset.train_image_set),
-        num_full_images=len(dataset.full_image_set),
+        num_train_images=len(dataset.train_image_set.split_indices),
+        num_full_images=len(dataset.full_image_set.split_indices),
         test_set_indices=dataset.test_timesteps,
         scene_aabb=dataset.get_aabb().reshape(2, 3),
+        dataset_obj=dataset,
         device=device
     )
     
     # NOTE: If resume, gaussians will be loaded from checkpoint
     #       If not, gaussians will be initialized from dataset
     if args.resume_from is not None:
+        trainer.init_gaussians_from_dataset(dataset, fast_run=True)
         trainer.resume_from_checkpoint(
             ckpt_path=args.resume_from,
             load_only_model=True
@@ -137,6 +139,16 @@ def main(args):
         logger.info(
             f"Resuming training from {args.resume_from}, starting at step {trainer.step}"
         )
+        if trainer.export_neus_2dgs:
+            print("exporting neus to 2dgs")
+            trainer.neus23dgs(output=True)
+            trainer.ground_method = "rsg"
+            trainer.save_checkpoint(
+                    log_dir=cfg.log_dir,
+                    save_only_model=True,
+                    is_final=False,
+                    ckpt_name="checkpoint_neus_2dgs",
+                )
     else:
         trainer.init_gaussians_from_dataset(dataset=dataset)
         logger.info(
@@ -156,21 +168,18 @@ def main(args):
         "RigidNodes_rgbs",
         "DeformableNodes_rgbs",
         "SMPLNodes_rgbs",
-        # "depths",
-        # "Background_depths",
-        # "Dynamic_depths",
-        # "RigidNodes_depths",
-        # "DeformableNodes_depths",
-        # "SMPLNodes_depths",
-        # "mask"
+        "depths",
+        "Background_depths",
+        "Dynamic_depths",
+        "RigidNodes_depths",
+        "DeformableNodes_depths",
+        "SMPLNodes_depths",
+        "mask",
+        "lidar_on_images",
+        "rgb_sky_blend",
+        "rgb_sky",
+        "rgb_error_maps",
     ]
-    if cfg.render.vis_lidar:
-        render_keys.insert(0, "lidar_on_images")
-    if cfg.render.vis_sky:
-        render_keys += ["rgb_sky_blend", "rgb_sky"]
-    if cfg.render.vis_error:
-        render_keys.insert(render_keys.index("rgbs") + 1, "rgb_error_maps")
-    
     # setup optimizer  
     trainer.initialize_optimizer()
     
@@ -188,11 +197,13 @@ def main(args):
     #     render_keys=render_keys,
     #     args=args,
     # )
-
+    dataset.train_image_set.mode = "random"
+    trainiter = dataset.train_image_set.get_iterator(num_workers=4, prefetch_factor=2)
     for step in metric_logger.log_every(all_iters, cfg.logging.print_freq):
         # ----------------------------------------------------------------------------
         # ----------------------------     Validate     ------------------------------
         if step % cfg.logging.vis_freq == 0 and cfg.logging.vis_freq > 0:
+            trainer.set_eval()
             logger.info("Visualizing...")
             vis_timestep = np.linspace(
                 0,
@@ -202,42 +213,34 @@ def main(args):
                 dtype=int,
             )[step // cfg.logging.vis_freq]
             # with torch.no_grad():
-            render_results = render_images(
-                trainer=trainer,
+            metrics_dict = render(
                 dataset=dataset.full_image_set,
+                trainer=trainer,
+                save_path=os.path.join(
+                    cfg.log_dir, "images", f"step_{step}.mp4"
+                ),
+                layout=dataset.layout,
+                num_timestamps=1,
+                keys=render_keys,
+                num_cams=trainer.n_camera,
+                save_images=False,
+                fps=cfg.render.fps,
                 compute_metrics=True,
                 compute_error_map=cfg.render.vis_error,
                 vis_indices=[
-                    vis_timestep * dataset.pixel_source.num_cams + i
-                    for i in range(dataset.pixel_source.num_cams)
+                    vis_timestep * trainer.n_camera + i
+                    for i in range(trainer.n_camera)
                 ],
             )
             if args.enable_wandb:
                 wandb.log(
                     {
-                        "image_metrics/psnr": render_results["psnr"],
-                        "image_metrics/ssim": render_results["ssim"],
-                        "image_metrics/occupied_psnr": render_results["occupied_psnr"],
-                        "image_metrics/occupied_ssim": render_results["occupied_ssim"],
+                        "image_metrics/psnr": metrics_dict["psnr"],
+                        "image_metrics/ssim": metrics_dict["ssim"],
+                        "image_metrics/occupied_psnr": metrics_dict["occupied_psnr"],
+                        "image_metrics/occupied_ssim": metrics_dict["occupied_ssim"],
                     }
                 )
-            vis_frame_dict = save_videos(
-                render_results,
-                save_pth=os.path.join(
-                    cfg.log_dir, "images", f"step_{step}.png"
-                ),  # don't save the video
-                layout=dataset.layout,
-                num_timestamps=1,
-                keys=render_keys,
-                save_seperate_video=cfg.logging.save_seperate_video,
-                num_cams=dataset.pixel_source.num_cams,
-                fps=cfg.render.fps,
-                verbose=False,
-            )
-            if args.enable_wandb:
-                for k, v in vis_frame_dict.items():
-                    wandb.log({"image_rendering/" + k: wandb.Image(v)})
-            del render_results
             torch.cuda.empty_cache()
         #----------------------------------------------------------------------------
         #----------------------------  training step  -------------------------------
@@ -249,37 +252,18 @@ def main(args):
             trainer.optimizer_zero_grad() # zero grad
             # get data
             train_step_camera_downscale = trainer._get_downscale_factor()
-            
+            if dataset.train_image_set.camera_downscale != train_step_camera_downscale:
+                dataset.train_image_set.camera_downscale = train_step_camera_downscale
             # sample training data
-            if os.environ.get("DATASET") == "kitti360/4cams":
-                # front train : fisheye train : fisheye test = 2 : 1 : 1
-                if torch.rand(1) < 5.0 / 6.0:
-                    if torch.rand(1) < 1.0 / 5.0:
-                        target_cam = [2, 3]
-                    else:
-                        target_cam = [0, 1]
-                    get_next_train = True
-                    while get_next_train:
-                        image_infos, cam_infos = dataset.train_image_set.next(train_step_camera_downscale)
-                        get_next_train = int(cam_infos['cam_id'].flatten()[0].item()) not in target_cam
-                else:
-                    get_next_test = True
-                    while get_next_test:
-                        image_infos, cam_infos = dataset.test_image_set.next(train_step_camera_downscale)
-                        if cam_infos['cam_id'].flatten()[0].item() < 2:
-                            get_next_test = True
-                        else:
-                            get_next_test = False
-            else:
-                image_infos, cam_infos = dataset.train_image_set.next(train_step_camera_downscale)
-                if 'road_masks' in image_infos:
-                    image_infos['road_masks'][-1, -1] = 1.0
+            image_infos, cam_infos = next(trainiter)
             for k, v in image_infos.items():
                 if isinstance(v, torch.Tensor):
-                    image_infos[k] = v.cuda(non_blocking=True)
+                    image_infos[k] = v[0].cuda(non_blocking=True)
             for k, v in cam_infos.items():
                 if isinstance(v, torch.Tensor):
-                    cam_infos[k] = v.cuda(non_blocking=True)
+                    cam_infos[k] = v[0].cuda(non_blocking=True)
+            if 'road_masks' in image_infos:
+                image_infos['road_masks'][-1, -1] = 1.0
             
             # forward & backward
             outputs = trainer(image_infos, cam_infos)
@@ -298,10 +282,7 @@ def main(args):
                     raise ValueError(f"Inf detected in loss {k} at step {step}")
             trainer.backward(loss_dict)
             
-            if os.environ.get("DATASET") == "kitti360/4cams":
-                next_iter = outputs['next_iter']
-            else:
-                next_iter = True        
+            next_iter = True        
         # after training step
         trainer.postprocess_per_train_step(step=step)
         
@@ -365,13 +346,24 @@ def main(args):
             
     
     logger.info("Training done!")
+    
+    if trainer.export_neus_2dgs:
+    #     print("exporting neus to 2dgs")
+    #     trainer.neus23dgs(output=True)
+    #     trainer.ground_method = "rsg"
+        trainer.save_checkpoint(
+                log_dir=cfg.log_dir,
+                save_only_model=True,
+                is_final=False,
+                ckpt_name="checkpoint_neus_2dgs",
+            )
 
     do_evaluation(
         step=step,
         cfg=cfg,
         trainer=trainer,
         dataset=dataset,
-        render_keys=render_keys,
+        render_keys=['rgbs', 'gt_rgbs'],
         args=args,
     )
     

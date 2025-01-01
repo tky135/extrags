@@ -16,7 +16,7 @@ Original paper: https://arxiv.org/abs/2308.04079
 from typing import Dict, List, Tuple
 from omegaconf import OmegaConf
 import logging
-
+import os
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
@@ -114,10 +114,24 @@ class VanillaGaussians(nn.Module):
         self.step = 0
         
         self.device = device
-        self.ball_gaussians=self.ctrl_cfg.get("ball_gaussians", False)
-        self.gaussian_2d = self.ctrl_cfg.get("gaussian_2d", False)
+        self.ball_gaussians = kwargs.get("ball_gaussians", False)
+        self.gaussian_2d = kwargs.get("gaussian_2d", False)
+            
+        self.ground_gs = kwargs.get("ground_gs", False)
         if 'sdf_grad' in kwargs:
             self.sdf_grad = kwargs['sdf_grad']
+        
+        self.query_rgb = kwargs.get("query_rgb", False)
+        if self.query_rgb:
+            self.feat2rgb = torch.nn.Sequential(
+                torch.nn.Linear(65, 65),
+                torch.nn.ReLU(),
+                torch.nn.Linear(65, 3),
+            ).to(self.device)
+        
+        self.query_height = True
+
+        self.query_quat = kwargs.get("query_quat", False)
         
         # for evaluation
         self.in_test_set = False
@@ -138,7 +152,6 @@ class VanillaGaussians(nn.Module):
         self._opacities = torch.zeros(1, 1, device=self.device)
         self._features_dc = torch.zeros(1, 3, device=self.device)
         self._features_rest = torch.zeros(1, num_sh_bases(self.sh_degree) - 1, 3, device=self.device)
-        self.ground_gs = False
         self.clip_scale = kwargs.get("clip_scale", None)
     @property
     def sh_degree(self):
@@ -200,7 +213,7 @@ class VanillaGaussians(nn.Module):
         self._opacities = Parameter(torch.logit(init_opacity * torch.ones(self.num_points, 1, device=self.device)))
         self.from_lidar = from_lidar.float()
     
-    def add_points(self, init_means: torch.Tensor, init_colors: torch.Tensor, from_lidar: torch.Tensor) -> None:
+    def add_points(self, init_means: torch.Tensor, init_colors: torch.Tensor, from_lidar: torch.Tensor, init_opacity: float = 0.1) -> None:
         new_means = Parameter(init_means)
         distances, _ = k_nearest_sklearn(new_means.data, 3)
         distances = torch.from_numpy(distances)
@@ -225,7 +238,7 @@ class VanillaGaussians(nn.Module):
             shs[:, 0, :3] = torch.logit(init_colors, eps=1e-10)
         new_features_dc = Parameter(shs[:, 0, :])
         new_features_rest = Parameter(shs[:, 1:, :])
-        new_opacities = Parameter(torch.logit(0.1 * torch.ones(new_means.shape[0], 1, device=self.device)))
+        new_opacities = Parameter(torch.logit(init_opacity * torch.ones(new_means.shape[0], 1, device=self.device)))
         new_from_lidar = from_lidar.float()
         
         self._means = Parameter(torch.cat([self._means.detach(), new_means], dim=0))
@@ -337,16 +350,25 @@ class VanillaGaussians(nn.Module):
         return self.get_gaussian_param_groups()
 
     def refinement_after(self, step, optimizer: torch.optim.Optimizer) -> None:
+        if os.environ.get("IS_CONT", "False") == "True":
+            return
         assert step == self.step
         if self.step <= self.ctrl_cfg.warmup_steps:
             return
         with torch.no_grad():
             # only split/cull if we've seen every image since opacity reset
             reset_interval = self.ctrl_cfg.reset_alpha_interval
-            do_densification = (
-                self.step < self.ctrl_cfg.stop_split_at
-                and self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval)
-            )
+            if "multibag" in os.environ.get("DATASET"):
+                do_densification = (
+                    self.step < self.ctrl_cfg.stop_split_at
+                    and self.step % reset_interval > max(300, self.ctrl_cfg.refine_interval)
+                )
+            else:
+                do_densification = (
+                    self.step < self.ctrl_cfg.stop_split_at
+                    and self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval)
+                    and self.num_points < 250_0000
+                )
             # split & duplicate
             print(f"Class {self.class_prefix} current points: {self.num_points} @ step {self.step}")
             if do_densification:
@@ -414,7 +436,12 @@ class VanillaGaussians(nn.Module):
 
             # cull NOTE: Offset all the opacity reset logic by refine_every so that we don't
                 # save checkpoints right when the opacity is reset (saves every 2k)
-            if self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval):
+            if "multibag" in os.environ.get("DATASET"):
+                do_cull = self.step % reset_interval > max(300, self.ctrl_cfg.refine_interval)
+            else:
+                do_cull = self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval)
+
+            if do_cull:
                 deleted_mask = self.cull_gaussians()
                 param_groups = self.get_gaussian_param_groups()
                 remove_from_optim(optimizer, deleted_mask, param_groups)
@@ -683,9 +710,21 @@ class VanillaGaussians(nn.Module):
     def get_gaussians(self, cam: dataclass_camera) -> Dict:
         filter_mask = torch.ones_like(self._means[:, 0], dtype=torch.bool)
         self.filter_mask = filter_mask
-        
+        # collect gaussians information
+        if not self.training:
+            output_means = self._means
+        else:
+            output_means = self._means.detach() * self.from_lidar.unsqueeze(-1) + self._means * (1.0 - self.from_lidar).unsqueeze(-1)
         # get colors of gaussians
-        colors = torch.cat((self._features_dc[:, None, :], self._features_rest), dim=1)
+        
+        if self.query_rgb and self.ground_gs:
+            # query color from sdf feature
+            feat = self.sdf_network((output_means.detach() + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, 1:]
+            colors = self.feat2rgb(feat)[:, None, :]
+            colors = torch.cat((colors, self._features_rest), dim=1)
+        else:
+            colors = torch.cat((self._features_dc[:, None, :].detach(), self._features_rest), dim=1)
+        
         if self.sh_degree > 0:
             viewdirs = self._means.detach() - cam.camtoworlds.data[..., :3, 3]  # (N, 3)
             viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
@@ -700,12 +739,8 @@ class VanillaGaussians(nn.Module):
         activated_rotations = self.get_quats
         actovated_colors = rgbs
         
-        # collect gaussians information
-        if not self.training:
-            output_means = self._means
-        else:
-            output_means = self._means.detach() * self.from_lidar.unsqueeze(-1) + self._means * (1.0 - self.from_lidar).unsqueeze(-1)
-        if self.ground_gs:
+        
+        if self.ground_gs and os.environ.get("IS_CONT", "False") != "True":
             # 验证
             # self.sdf_network.sdf((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]))
             if self.sdf_grad:
@@ -713,31 +748,58 @@ class VanillaGaussians(nn.Module):
             else:
                 with torch.no_grad():
                     elevation = (self.sdf_network((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, :1] * 9).detach()
+            if self.query_quat:
+                quat = self.sdf_network.get_quat((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]))
+            else:
+                quat = self.get_quats
+
             output_means = torch.cat([output_means[:, :2], elevation], dim=-1)
-            if self.step % 10 == 0:
+            if False:
                 normal_align_loss = 1 - torch.abs(torch.sum(self.quaternion_to_vector(activated_rotations[filter_mask]) * self.knn_normal(output_means[filter_mask]), dim=-1))
                 normal_align_loss = normal_align_loss.mean()
             else:
                 normal_align_loss = torch.tensor(0.0).to(self.device)
             # normals = 
-            gs_dict = dict(
-                    _means=output_means[filter_mask],
-                    _opacities=activated_opacities[filter_mask],
-                    _rgbs=actovated_colors[filter_mask],
-                    _scales=activated_scales[filter_mask].clip(0, self.clip_scale) if self.clip_scale is not None else activated_scales[filter_mask],
-                    _quats=activated_rotations[filter_mask],
-                    align_error=normal_align_loss,
+        if self.ground_gs:
+            # 2dgs
+            if os.environ.get("IS_CONT", "False") == "True":
+                gs_dict = dict(
+                    _means=output_means.detach(),
+                    _opacities=activated_opacities.detach(),
+                    _rgbs=actovated_colors,
+                    _scales=activated_scales.detach(),
+                    _quats=activated_rotations.detach(),
+                    align_error=torch.tensor(0.0).to(self.device),
                 )
+            else:
+                gs_dict = dict(
+                        _means=output_means[filter_mask],
+                        _opacities=activated_opacities[filter_mask],
+                        _rgbs=actovated_colors[filter_mask],
+                        _scales=activated_scales[filter_mask].clip(0, self.clip_scale) if self.clip_scale is not None else activated_scales[filter_mask],
+                        _quats=quat[filter_mask],
+                        align_error=normal_align_loss,
+                    )
             # 计算法向量
             
         else:
-            gs_dict = dict(
-                    _means=output_means[filter_mask],
-                    _opacities=activated_opacities[filter_mask],
-                    _rgbs=actovated_colors[filter_mask],
-                    _scales=activated_scales[filter_mask],
-                    _quats=activated_rotations[filter_mask],
+            # 3dgs
+            if os.environ.get("IS_CONT", "False") == "True":
+                gs_dict = dict(
+                    _means=output_means.detach(),
+                    _opacities=activated_opacities.detach(),
+                    _rgbs=actovated_colors.detach(),
+                    _scales=activated_scales.detach(),
+                    _quats=activated_rotations.detach(),
                 )
+            else:
+                gs_dict = dict(
+                        _means=self._means[filter_mask],
+                        _opacities=activated_opacities[filter_mask],
+                        _rgbs=actovated_colors[filter_mask],
+                        _scales=activated_scales[filter_mask],
+                        _quats=activated_rotations[filter_mask],
+                    )
         # if self.step < 10000:
         #     gs_dict = dict(
         #         _means=self._means[filter_mask].detach(),
@@ -768,6 +830,8 @@ class VanillaGaussians(nn.Module):
     
     def compute_reg_loss(self):
         loss_dict = {}
+        if os.environ.get("IS_CONT", "False") == "True":
+            return loss_dict
         sharp_shape_reg_cfg = self.reg_cfg.get("sharp_shape_reg", None)
         if sharp_shape_reg_cfg is not None:
             w = sharp_shape_reg_cfg.w
@@ -821,7 +885,8 @@ class VanillaGaussians(nn.Module):
         self._features_dc = Parameter(torch.zeros((N,) + self._features_dc.shape[1:], device=self.device))
         self._features_rest = Parameter(torch.zeros((N,) + self._features_rest.shape[1:], device=self.device))
         self._opacities = Parameter(torch.zeros((N,) + self._opacities.shape[1:], device=self.device))
-        msg = super().load_state_dict(state_dict, **kwargs)
+        self.from_lidar = torch.zeros(N, device=self.device)
+        msg = super().load_state_dict(state_dict, strict=False)
         return msg
     
     def export_gaussians_to_ply(self, alpha_thresh: float) -> Dict:
@@ -834,3 +899,28 @@ class VanillaGaussians(nn.Module):
             "positions": means[mask],
             "colors": direct_color[mask],
         }
+    def construct_list_of_attributes(self):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        for i in range(self._features_dc.shape[1]):
+            l.append('f_dc_{}'.format(i))
+        for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
+            l.append('f_rest_{}'.format(i))
+        l.append('opacity')
+        for i in range(self.get_scaling.shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(self.get_quats.shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
+    def do_update(self):
+        with torch.no_grad():
+            elevation = self.sdf_network((self._means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, :1] * 9
+            quat = self.sdf_network.get_quat((self._means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]))
+            feat = self.sdf_network((self._means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]), output_height=True)[:, 1:]
+            colors = self.feat2rgb(feat)
+            self._means[:, 2] = elevation.squeeze()
+            self._quats[:] = quat
+            import ipdb ; ipdb.set_trace()
+            self._features_dc[:] = colors
+            if self.clip_scale is not None:
+                self._scales[:] = self._scales.clip(0, self.clip_scale)

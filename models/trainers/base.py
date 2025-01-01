@@ -87,6 +87,7 @@ class BasicTrainer(nn.Module):
         self.res_schedule = res_schedule
         self.model_config = model_config
         self.num_iters = self.optim_general.get("num_iters", 30000)
+        self.cont_num_iters_start = self.optim_general.get("cont_num_iters_start", self.num_iters + 1)
         self.lidar_pretrain_iters = self.optim_general.get("lidar_pretrain_iters", 10000)
         self.gaussian_optim_general_cfg = gaussian_optim_general_cfg
         self.gaussian_ctrl_general_cfg = gaussian_ctrl_general_cfg
@@ -180,6 +181,8 @@ class BasicTrainer(nn.Module):
         # get param groups first
         self.param_groups = {}
         for class_name, model in self.models.items():
+            if os.environ.get("IS_CONT") == "True" and class_name in ['CamPose', 'Ground']:
+                continue
             self.param_groups.update(model.get_param_groups())
                  
         groups = []
@@ -331,6 +334,14 @@ class BasicTrainer(nn.Module):
 
             # 重置优化器
             self.initialize_optimizer()
+            return
+        if self.step == self.cont_num_iters_start:
+            
+            self.neus23dgs()
+            # 重置优化器
+            os.environ['IS_CONT'] = "True"
+            self.initialize_optimizer()
+            self.ground_method = "rsg"
             return
 
         radii = self.info["radii"]
@@ -592,9 +603,10 @@ class BasicTrainer(nn.Module):
         camera_infos: Dict[str, torch.Tensor]
         ):
         if 'CameraEncod' in self.models:
-            rgb_blended_encoded = self.models['CameraEncod'](rgb_blended, camera_infos['cam_id'].flatten()[0])
-            return rgb_blended_encoded
-        if "Affine" in self.models:
+            rgb_blended_encoded = self.models['CameraEncod'](rgb_blended, camera_infos['cam_id'].flatten()[0], camera_infos['bag_id'])
+            # return rgb_blended_encoded
+            rgb_blended = rgb_blended_encoded
+        if 'Affine' in self.models:
             affine_trs = self.models['Affine'](image_infos)
             if len(rgb_blended.shape) == 3:
                 rgb_transformed = (affine_trs[..., :3, :3] @ rgb_blended[..., None] + affine_trs[..., :3, 3:])[..., 0]
@@ -923,7 +935,7 @@ class BasicTrainer(nn.Module):
                 continue
             msg = model.load_state_dict(model_state_dict[class_name], strict=strict)
             logger.info(f"{class_name}: {msg}")
-        msg = super().load_state_dict(state_dict, strict)
+        msg = super().load_state_dict(state_dict, strict=False)
         logger.info(f"BasicTrainer: {msg}")
         
     def resume_from_checkpoint(
@@ -942,15 +954,16 @@ class BasicTrainer(nn.Module):
         self,
         log_dir: str,
         save_only_model: bool=True,
-        is_final: bool=False
+        is_final: bool=False,
+        ckpt_name: str = "checkpoint"
     ) -> None:
         """
         Save model to checkpoint.
         """
         if is_final:
-            ckpt_path = os.path.join(log_dir, f"checkpoint_final.pth")
+            ckpt_path = os.path.join(log_dir, f"{ckpt_name}_final.pth")
         else:
-            ckpt_path = os.path.join(log_dir, f"checkpoint_{self.step:05d}.pth")
+            ckpt_path = os.path.join(log_dir, f"{ckpt_name}_{self.step:05d}.pth")
         torch.save(self.state_dict(only_model=save_only_model), ckpt_path)
         logger.info(f"Saved a checkpoint to {ckpt_path}")
         

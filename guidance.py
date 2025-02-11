@@ -534,9 +534,8 @@ class MagicDrive:
         """
         pred_rgb: [1, 6, 3, 224, 400]
         """
-        if not os.path.exists(f"save_dict_03_{sample_token}.pt"):
-            save_dict = {'pred_rgb': pred_rgb, 'sample_token': sample_token, 'timestep': timestep, 'shift_x': shift_x, 'step': step, 'method': method, 'inpainting_mask': inpainting_mask}
-            torch.save(save_dict, f"save_dict_03_{sample_token}.pt")
+
+        # save_dict = {'pred_rgb': pred_rgb, 'sample_token': sample_token, 'timestep': timestep, 'shift_x': shift_x, 'step': step, 'method': method, 'inpainting_mask': inpainting_mask}
         
         # get sample info
         info = self.get_info(sample_token, shift_x)

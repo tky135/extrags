@@ -495,6 +495,31 @@ class MultiTrainer(BasicTrainer):
                 outputs_ground['rgb'] = outputs_ground['rgb_gaussians']
             outputs['ground_gs'] = outputs_ground
         
+        # render uncertainty
+        gs_uncert = self.collect_gaussians(
+            cam=processed_cam,
+            image_ids=None,
+            is_uncertainty=True
+        )
+
+        outputs_uncertainty, render_fn_uncertainty = self.render_gaussians(
+            gs=gs_uncert,
+            cam=processed_cam,
+            near_plane=self.render_cfg.near_plane,
+            far_plane=self.render_cfg.far_plane,
+            render_mode="RGB",
+            radius_clip=self.render_cfg.get('radius_clip', 0.),
+            is_ground=False,
+            is_uncertainty=True
+        )
+        outputs['uncertainty'] = outputs_uncertainty
+
+
+        # manually update uncertainty count
+        uncertainty_info = self.uncert_info
+
+
+
         # 渲染3dgs
         gs = self.collect_gaussians(
             cam=processed_cam,
@@ -610,8 +635,8 @@ class MultiTrainer(BasicTrainer):
                 outputs["Dynamic_rgb"] = self.affine_transformation(sep_rgb, image_infos, camera_infos)
                 outputs["Dynamic_opacity"] = sep_opacity
                 outputs["Dynamic_depth"] = sep_depth
-        if ((self.step % 100 == 1) and self.training):# or is_diffusion_step:
-        # if ((self.step % 100 == 1) and self.training) or is_diffusion_step:
+        # if ((self.step % 100 == 1) and self.training):# or is_diffusion_step:
+        if ((self.step % 100 == 1) and self.training) or is_diffusion_step:
             with torch.no_grad():
                 write_rgb = outputs['rgb'].detach().cpu() * 255
                 
@@ -661,7 +686,7 @@ class MultiTrainer(BasicTrainer):
             depth_gt_vis = depth_to_rgb(image_infos['lidar_depth_map'].squeeze(), min_val=0, max_val=100)
             image_infos['depth_blend'] = depth_blend_vis
             image_infos['depth_gt'] = depth_gt_vis
-            image_infos['uncertainty'] = outputs['3dgs']['uncertainty'].detach().cpu().repeat(1, 1, 3)
+            image_infos['uncertainty'] = 1.0 - outputs['uncertainty']['rgb_gaussians'].detach().cpu().repeat(1, 1, 3).clip(0, 1)
             image_infos['opacity'] = outputs['3dgs']['opacity'].detach().cpu().repeat(1, 1, 3)
             self.models['Ground'].validate_image(image_infos, camera_infos)
             if self.step % 10000 == 0 and self.step > 0 and self.training:

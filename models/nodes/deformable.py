@@ -46,7 +46,7 @@ class DeformableNodes(RigidNodes):
         delta_xyz, delta_quat, delta_scale = self.deform_network(x, t, nonrigid_embed)
         return delta_xyz, delta_quat, delta_scale
     
-    def get_gaussians(self, cam: dataclass_camera) -> Dict[str, torch.Tensor]:
+    def get_gaussians(self, cam: dataclass_camera, is_uncertainty: bool = False) -> Dict[str, torch.Tensor]:
         filter_mask = torch.ones_like(self._means[:, 0], dtype=torch.bool)
         self.filter_mask = filter_mask
         
@@ -85,22 +85,35 @@ class DeformableNodes(RigidNodes):
         else:
             rgbs = torch.sigmoid(colors[:, 0, :])
         # get view-dependent uncertainty
-        uncertainty_pdf = self.get_uncertainty(viewdirs)
+        # uncertainty_pdf = self.get_uncertainty(viewdirs)
         valid_mask = self.get_pts_valid_mask()
             
         activated_opacities = self.get_opacity * valid_mask.float().unsqueeze(-1)
         activated_rotations = self.quat_act(world_quats)
-        actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
+        if is_uncertainty:
+            actovated_colors = self.get_uncertainty(viewdirs).unsqueeze(-1)
+        else:
+            actovated_colors = rgbs
+        # actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
         # actovated_colors = rgbs
         
         # collect gaussians information
-        gs_dict = dict(
-            _means=world_means[filter_mask],
-            _opacities=activated_opacities[filter_mask],
-            _rgbs=actovated_colors[filter_mask],
-            _scales=activated_scales[filter_mask],
-            _quats=activated_rotations[filter_mask],
-        )
+        if is_uncertainty:
+            gs_dict = dict(
+                _means=world_means[filter_mask].detach(),
+                _opacities=activated_opacities[filter_mask].detach(),
+                _rgbs=actovated_colors[filter_mask],
+                _scales=activated_scales[filter_mask].detach(),
+                _quats=activated_rotations[filter_mask].detach(),
+            )
+        else:
+            gs_dict = dict(
+                _means=world_means[filter_mask],
+                _opacities=activated_opacities[filter_mask],
+                _rgbs=actovated_colors[filter_mask],
+                _scales=activated_scales[filter_mask],
+                _quats=activated_rotations[filter_mask],
+            )
 
         # check nan in gs_dict
         for k, v in gs_dict.items():
@@ -184,6 +197,7 @@ class DeformableNodes(RigidNodes):
             self._quats = Parameter(torch.cat([self._quats, new_gaussian["_quats"]], dim=0))
             self._features_dc = Parameter(torch.cat([self._features_dc, new_gaussian["_features_dc"]], dim=0))
             self._features_rest = Parameter(torch.cat([self._features_rest, new_gaussian["_features_rest"]], dim=0))
+            self._uncertainty = Parameter(torch.cat([self._uncertainty, new_gaussian["_uncertainty"]], dim=0))
             self._opacities = Parameter(torch.cat([self._opacities, new_gaussian["_opacities"]], dim=0))
             # keeps original point ids
             self.point_ids = torch.cat([self.point_ids, torch.full_like(new_gaussian["point_ids"], ins_id)], dim=0)

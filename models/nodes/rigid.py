@@ -96,6 +96,7 @@ class RigidNodes(VanillaGaussians):
             shs[:, 0, :3] = torch.logit(init_colors, eps=1e-10)
         self._features_dc = Parameter(shs[:, 0, :])
         self._features_rest = Parameter(shs[:, 1:, :])
+        self._uncertainty = Parameter(torch.randn(self.num_points, self.uncertainty_num_coeffs, 1, device=self.device))
         self._opacities = Parameter(torch.logit(0.1 * torch.ones(self.num_points, 1, device=self.device)))
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
@@ -153,10 +154,12 @@ class RigidNodes(VanillaGaussians):
                     split_means,
                     split_feature_dc,
                     split_feature_rest,
+                    split_uncertainty,
                     split_opacities,
                     split_scales,
                     split_quats,
                     split_ids,
+                    split_alpha_cum,
                 ) = self.split_gaussians(splits, nsamps)
 
                 dups = (
@@ -168,20 +171,24 @@ class RigidNodes(VanillaGaussians):
                     dup_means,
                     dup_feature_dc,
                     dup_feature_rest,
+                    dup_uncertainty,
                     dup_opacities,
                     dup_scales,
                     dup_quats,
                     dup_ids,
+                    dup_alpha_cum
                 ) = self.dup_gaussians(dups)
                 
                 self._means = Parameter(torch.cat([self._means.detach(), split_means, dup_means], dim=0))
                 # self.colors_all = Parameter(torch.cat([self.colors_all.detach(), split_colors, dup_colors], dim=0))
                 self._features_dc = Parameter(torch.cat([self._features_dc.detach(), split_feature_dc, dup_feature_dc], dim=0))
                 self._features_rest = Parameter(torch.cat([self._features_rest.detach(), split_feature_rest, dup_feature_rest], dim=0))
+                self._uncertainty = Parameter(torch.cat([self._uncertainty.detach(), split_uncertainty, dup_uncertainty], dim=0))
                 self._opacities = Parameter(torch.cat([self._opacities.detach(), split_opacities, dup_opacities], dim=0))
                 self._scales = Parameter(torch.cat([self._scales.detach(), split_scales, dup_scales], dim=0))
                 self._quats = Parameter(torch.cat([self._quats.detach(), split_quats, dup_quats], dim=0))
                 self.point_ids = torch.cat([self.point_ids, split_ids, dup_ids], dim=0)
+                self.alpha_cum = torch.cat([self.alpha_cum, split_alpha_cum.reshape(-1), dup_alpha_cum], dim=0)
                 
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
@@ -254,8 +261,10 @@ class RigidNodes(VanillaGaussians):
         # self.colors_all = Parameter(self.colors_all[~culls].detach())
         self._features_dc = Parameter(self._features_dc[~culls].detach())
         self._features_rest = Parameter(self._features_rest[~culls].detach())
+        self._uncertainty = Parameter(self._uncertainty[~culls].detach())
         self._opacities = Parameter(self._opacities[~culls].detach())
         self.point_ids = self.point_ids[~culls]
+        self.alpha_cum = self.alpha_cum[~culls]
 
         print(f"     Cull: {n_bef - self.num_points}")
         return culls
@@ -279,6 +288,7 @@ class RigidNodes(VanillaGaussians):
         # new_colors_all = self.colors_all[split_mask].repeat(samps, 1, 1)
         new_feature_dc = self._features_dc[split_mask].repeat(samps, 1)
         new_feature_rest = self._features_rest[split_mask].repeat(samps, 1, 1)
+        new_uncertainty = self._uncertainty[split_mask].repeat(samps, 1, 1)
         # step 3, sample new opacities
         new_opacities = self._opacities[split_mask].repeat(samps, 1)
         # step 4, sample new scales
@@ -289,7 +299,8 @@ class RigidNodes(VanillaGaussians):
         new_quats = self._quats[split_mask].repeat(samps, 1)
         # step 6, sample new ids
         new_ids = self.point_ids[split_mask].repeat(samps, 1)
-        return new_means, new_feature_dc, new_feature_rest, new_opacities, new_scales, new_quats, new_ids
+        new_alpha_cum = self.alpha_cum.reshape(-1, 1)[split_mask].repeat(samps, 1)
+        return new_means, new_feature_dc, new_feature_rest, new_uncertainty, new_opacities, new_scales, new_quats, new_ids, new_alpha_cum
 
     def dup_gaussians(self, dup_mask: torch.Tensor) -> Tuple:
         """
@@ -301,11 +312,13 @@ class RigidNodes(VanillaGaussians):
         # dup_colors = self.colors_all[dup_mask]
         dup_feature_dc = self._features_dc[dup_mask]
         dup_feature_rest = self._features_rest[dup_mask]
+        dup_uncertainty = self._uncertainty[dup_mask]
         dup_opacities = self._opacities[dup_mask]
         dup_scales = self._scales[dup_mask]
         dup_quats = self._quats[dup_mask]
         dup_ids = self.point_ids[dup_mask]
-        return dup_means, dup_feature_dc, dup_feature_rest, dup_opacities, dup_scales, dup_quats, dup_ids
+        dup_alpha_cum = self.alpha_cum[dup_mask]
+        return dup_means, dup_feature_dc, dup_feature_rest, dup_uncertainty, dup_opacities, dup_scales, dup_quats, dup_ids, dup_alpha_cum
 
     def get_out_of_bound_mask(self):
         """
@@ -381,7 +394,7 @@ class RigidNodes(VanillaGaussians):
         _quats = self.quat_act(quats)
         return quat_mult(global_quats_per_pts, _quats)
 
-    def get_gaussians(self, cam: dataclass_camera) -> Dict[str, torch.Tensor]:
+    def get_gaussians(self, cam: dataclass_camera, is_uncertainty:bool = False) -> Dict[str, torch.Tensor]:
         filter_mask = torch.ones_like(self._means[:, 0], dtype=torch.bool)
         self.filter_mask = filter_mask
         # NOTE: hack here, need to consider a gaussian filter for efficient rendering
@@ -401,24 +414,36 @@ class RigidNodes(VanillaGaussians):
             rgbs = torch.sigmoid(colors[:, 0, :])
 
         # get view-dependent uncertainty
-        uncertainty_pdf = self.get_uncertainty(viewdirs)
+        if is_uncertainty:
+            actovated_colors = self.get_uncertainty(viewdirs).unsqueeze(-1)
+        else:
+            actovated_colors = rgbs
         
         valid_mask = self.get_pts_valid_mask()
             
         activated_opacities = self.get_opacity * valid_mask.float().unsqueeze(-1)
         activated_scales = self.get_scaling
         activated_rotations = self.quat_act(world_quats)
-        actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
+        # actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
         # actovated_colors = rgbs
         
         # collect gaussians information
-        gs_dict = dict(
-            _means=world_means[filter_mask],
-            _opacities=activated_opacities[filter_mask],
-            _rgbs=actovated_colors[filter_mask],
-            _scales=activated_scales[filter_mask],
-            _quats=activated_rotations[filter_mask],
-        )
+        if is_uncertainty:
+            gs_dict = dict(
+                _means=world_means[filter_mask].detach(),
+                _opacities=activated_opacities[filter_mask].detach(),
+                _rgbs=actovated_colors[filter_mask],
+                _scales=activated_scales[filter_mask].detach(),
+                _quats=activated_rotations[filter_mask].detach(),
+            )
+        else:
+            gs_dict = dict(
+                _means=world_means[filter_mask],
+                _opacities=activated_opacities[filter_mask],
+                _rgbs=actovated_colors[filter_mask],
+                _scales=activated_scales[filter_mask],
+                _quats=activated_rotations[filter_mask],
+            )
         
         # check nan and inf in gs_dict
         for k, v in gs_dict.items():
@@ -447,6 +472,7 @@ class RigidNodes(VanillaGaussians):
             "quats": activated_local_rotations,
             "sh_dcs": self._features_dc[pts_mask],
             "sh_rests": self._features_rest[pts_mask],
+            "uncertainty": self._uncertainty[pts_mask],
             "ids": self.point_ids[pts_mask],
         }
         return gaussian_dict
@@ -525,6 +551,7 @@ class RigidNodes(VanillaGaussians):
             self._quats = Parameter(self._quats[mask])
             self._features_dc = Parameter(self._features_dc[mask])
             self._features_rest = Parameter(self._features_rest[mask])
+            self._uncertainty = Parameter(self._uncertainty[mask])
             self._opacities = Parameter(self._opacities[mask])
             self.point_ids = self.point_ids[mask]
         
@@ -538,6 +565,7 @@ class RigidNodes(VanillaGaussians):
                     "_quats": self._quats[self.point_ids[..., 0] == id],
                     "_features_dc": self._features_dc[self.point_ids[..., 0] == id],
                     "_features_rest": self._features_rest[self.point_ids[..., 0] == id],
+                    "_uncertainty": self._uncertainty[self.point_ids[..., 0] == id],
                     "_opacities": self._opacities[self.point_ids[..., 0] == id],
                     "point_ids": self.point_ids[self.point_ids[..., 0] == id],
                 }
@@ -563,6 +591,7 @@ class RigidNodes(VanillaGaussians):
             self._quats = Parameter(torch.cat([self._quats, new_gaussian["_quats"]], dim=0))
             self._features_dc = Parameter(torch.cat([self._features_dc, new_gaussian["_features_dc"]], dim=0))
             self._features_rest = Parameter(torch.cat([self._features_rest, new_gaussian["_features_rest"]], dim=0))
+            self._uncertainty = Parameter(torch.cat([self._uncertainty, new_gaussian["_uncertainty"]], dim=0))
             self._opacities = Parameter(torch.cat([self._opacities, new_gaussian["_opacities"]], dim=0))
             # keeps original point ids
             self.point_ids = torch.cat([self.point_ids, torch.full_like(new_gaussian["point_ids"], ins_id)], dim=0)

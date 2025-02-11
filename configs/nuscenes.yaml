@@ -46,6 +46,8 @@ trainer:
       lr: 0.0025
     sh_rest:
       lr: 0.000125
+    uncertainty:
+      lr: 0.1
     opacity:
       lr: 0.05
     scaling:

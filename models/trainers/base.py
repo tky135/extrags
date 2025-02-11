@@ -181,8 +181,8 @@ class BasicTrainer(nn.Module):
         # get param groups first
         self.param_groups_diffusion = {}
         for class_name, model in self.models.items():
-            if class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus', 'DeformableNodes', 'Background', 'Sky']:
-                continue
+            # if class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus', 'DeformableNodes', 'Background', 'Sky']:
+            #     continue
             if os.environ.get("IS_CONT") == "True" and class_name in ['CamPose', 'Ground']:
                 continue
             self.param_groups_diffusion.update(model.get_param_groups())
@@ -197,6 +197,8 @@ class BasicTrainer(nn.Module):
             component_name = params_name.split("#")[1]
             # if component_name in ['sh_rest', 'ins_rotation', 'ins_translation']:
             #     continue
+            if component_name != "uncertainty" and class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus', 'DeformableNodes', 'Background', 'Sky']:
+                continue
             class_cfg = self.model_config.get(class_name)
             class_optim_cfg = class_cfg["optim"]
             
@@ -426,6 +428,8 @@ class BasicTrainer(nn.Module):
             return
 
         radii = self.info["radii"]
+        alphas = self.info["opacities"]
+        
         if self.render_cfg.absgrad:
             grads = self.info["means2d"].absgrad.clone()
         else:
@@ -462,13 +466,14 @@ class BasicTrainer(nn.Module):
                     )
             else:
                 gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
-                if self.step > self.diff_start and class_name not in ['RigidNodes']:
-                    continue
+                # if self.step > self.diff_start and class_name not in ['RigidNodes']:
+                #     continue
                 self.models[class_name].postprocess_per_train_step(
                     step=step,
                     optimizer=[self.optimizer_all, self.optimizer_diffusion],
                     radii=radii[0, gaussian_mask],
                     xys_grad=grads[0, gaussian_mask] * 0.1 if diff_grad else grads[0, gaussian_mask],
+                    alphas=alphas[0, gaussian_mask],
                     last_size=max(self.info["width"], self.info["height"]),
                     do_refinement=do_refinement
                 )
@@ -531,7 +536,8 @@ class BasicTrainer(nn.Module):
         self,
         cam: dataclass_camera,
         image_ids: torch.Tensor, # leave it here for future use
-        is_ground: bool = False
+        is_ground: bool = False,
+        is_uncertainty: bool = False
     ) -> dataclass_gs:
         gs_dict = {
             "_means": [],
@@ -548,7 +554,7 @@ class BasicTrainer(nn.Module):
                 continue
             if not is_ground and class_name in ["Ground_gs"]:
                 continue
-            gs = self.models[class_name].get_gaussians(cam)
+            gs = self.models[class_name].get_gaussians(cam, is_uncertainty)
             if gs is None:
                 continue
     
@@ -587,35 +593,59 @@ class BasicTrainer(nn.Module):
         gs: dataclass_gs,
         cam: dataclass_camera,
         is_ground: bool = False,
+        is_uncertainty: bool = False,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
     
         def render_fn(opaticy_mask=None, method="default", return_info=False):
             if method == 'default':
-                renders, alphas, info = rasterization(
-                    means=gs.means,
-                    quats=gs.quats,
-                    scales=gs.scales,
-                    opacities=gs.opacities.squeeze()*opaticy_mask if opaticy_mask is not None else gs.opacities.squeeze(),
-                    colors=gs.rgbs,
-                    viewmats=torch.linalg.inv(cam.camtoworlds)[None, ...],  # [C, 4, 4]
-                    Ks=cam.Ks[None, ...],  # [C, 3, 3]
-                    width=cam.W,
-                    height=cam.H,
-                    packed=self.render_cfg.packed,
-                    absgrad=self.render_cfg.absgrad,
-                    sparse_grad=self.render_cfg.sparse_grad,
-                    rasterize_mode="antialiased" if self.render_cfg.antialiased else "classic",
-                    **kwargs,
-                )
+                if is_uncertainty:
+                    renders, alphas, info = rasterization(
+                        means=gs.means,
+                        quats=gs.quats,
+                        scales=gs.scales,
+                        opacities=gs.opacities.squeeze()*opaticy_mask if opaticy_mask is not None else gs.opacities.squeeze(),
+                        colors=gs.rgbs,
+                        viewmats=torch.linalg.inv(cam.camtoworlds)[None, ...],  # [C, 4, 4]
+                        Ks=cam.Ks[None, ...],  # [C, 3, 3]
+                        width=cam.W,
+                        height=cam.H,
+                        backgrounds=torch.ones((1, 1)).to(self.device), # [C, D]
+                        packed=self.render_cfg.packed,
+                        absgrad=self.render_cfg.absgrad,
+                        sparse_grad=self.render_cfg.sparse_grad,
+                        rasterize_mode="antialiased" if self.render_cfg.antialiased else "classic",
+                        **kwargs,
+                    )
+                else:
+                    renders, alphas, info = rasterization(
+                        means=gs.means,
+                        quats=gs.quats,
+                        scales=gs.scales,
+                        opacities=gs.opacities.squeeze()*opaticy_mask if opaticy_mask is not None else gs.opacities.squeeze(),
+                        colors=gs.rgbs,
+                        viewmats=torch.linalg.inv(cam.camtoworlds)[None, ...],  # [C, 4, 4]
+                        Ks=cam.Ks[None, ...],  # [C, 3, 3]
+                        width=cam.W,
+                        height=cam.H,
+                        packed=self.render_cfg.packed,
+                        absgrad=self.render_cfg.absgrad,
+                        sparse_grad=self.render_cfg.sparse_grad,
+                        rasterize_mode="antialiased" if self.render_cfg.antialiased else "classic",
+                        **kwargs,
+                    )
                 renders = renders[0]
                 alphas = alphas[0].squeeze(-1)
                 assert self.render_cfg.batch_size == 1, "batch size must be 1, will support batch size > 1 in the future"
-                assert renders.shape[-1] == 5, f"Must render rgb, depth and alpha"
-                rendered_rgb, rendered_uncertainty, rendered_depth = torch.split(renders, [3, 1, 1], dim=-1)
+                # assert renders.shape[-1] == 5, f"Must render rgb, depth and alpha"
+                if renders.shape[-1] == 4: 
+                    rendered_rgb, rendered_depth = torch.split(renders, [3, 1], dim=-1)
+                else:
+                    rendered_rgb = renders
+                    rendered_depth = None
+
                 output = {
                     'rgb_gaussians': torch.clamp(rendered_rgb, max=1.0),
-                    'uncertainty': rendered_uncertainty,
                     'depth': rendered_depth,
                     'opacity': alphas[..., None]
                 }
@@ -665,12 +695,21 @@ class BasicTrainer(nn.Module):
                 return output, info
         
         # render rgb and opacity
+        
         if not is_ground:
-            results, self.info = render_fn(return_info=True)
+            results, info = render_fn(return_info=True)
+            if results['rgb_gaussians'].shape[-1] == 3:
+                self.info = info
+                is_uncert = False
+            elif results['rgb_gaussians'].shape[-1] == 1:
+                self.uncert_info = info
+                is_uncert = True
+            else:
+                raise Exception
         else:
             results, self.ground_info = render_fn(method='2dgs', return_info=True)
         
-        if self.training:
+        if self.training and not is_uncert:
             if not is_ground:
                 self.info["means2d"].retain_grad()
             else:
@@ -959,10 +998,12 @@ class BasicTrainer(nn.Module):
                 })
 
         # update uncertainty
-        # uncertainty_loss = torch.nn.functional.mse_loss(outputs['3dgs']['uncertainty'], outputs['3dgs']['opacity'].detach(), reduction='mean')
-        # loss_dict.update({
-        #     "uncertainty_loss": uncertainty_loss
-        # })
+        # uncertainty_loss = torch.nn.functional.mse_loss(outputs['uncertainty']['rgb_gaussians'].clip(0, 1), outputs['uncertainty']['opacity'].detach(), reduction='mean')
+        uncertainty_loss = - outputs['uncertainty']['rgb_gaussians'].log().mean()
+        loss_dict.update({
+            "uncertainty_loss": uncertainty_loss * 1e5
+        })
+        print("uncertainty_loss: ", uncertainty_loss)
         if image_infos['is_pseudo']:
             raise Exception("Not Implemented")
         return loss_dict

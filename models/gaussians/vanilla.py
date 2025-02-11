@@ -72,6 +72,11 @@ def quaternion_conjugate(q):
     """Returns the conjugate of a quaternion."""
     w, x, y, z = q
     return np.array([w, -x, -y, -z])
+def enhance_edges(x, gamma=2):
+    if x <= 0.5:
+        return 0.5 * (2 * x) ** gamma
+    else:
+        return 1 - 0.5 * (2 * (1 - x)) ** gamma
 
 def apply_quaternion_rotation(quaternions, points):
     """Applies a quaternion rotation to a set of 3D points."""
@@ -157,17 +162,27 @@ class VanillaGaussians(nn.Module):
         # uncertainty learning
         self.uncertainty_degree = 2
         self.uncertainty_num_coeffs = (self.uncertainty_degree + 1) ** 2
-        self.uncertainty_coeffs = nn.Parameter(torch.randn(self.uncertainty_num_coeffs)).to(self.device)
+        # self.uncertainty_coeffs = nn.Parameter(torch.randn(self.uncertainty_num_coeffs)).to(self.device)
+        self._uncertainty = torch.zeros(1, self.uncertainty_num_coeffs, 1, device=self.device)
+
+        self.alpha_cum = None
+        self.alpha_cnt = 0
 
     def get_uncertainty(self, directions):
         directions = F.normalize(directions, p=2, dim=-1)
-        coeffs = self.uncertainty_coeffs.unsqueeze(0).repeat(directions.size(0), 1)
 
-        coeffs = coeffs.unsqueeze(-1).repeat(1, 1, 3)
+        normalized_coeffs = self._uncertainty / torch.norm(self._uncertainty, dim=(1, 2), keepdim=True).detach()
+
+        coeffs = normalized_coeffs.repeat(1, 1, 3)
         f = spherical_harmonics(self.uncertainty_degree, directions, coeffs)[:, 0]
         pdf_unnorm = f ** 2
-        norm = torch.sum(self.uncertainty_coeffs ** 2)
-        pdf = pdf_unnorm / (norm + 1e-10)
+        # norm = torch.sum(self._uncertainty ** 2, dim=(1, 2))
+        # pdf = pdf_unnorm / (norm + 1e-10)
+        if self.alpha_cum is not None:
+            pdf = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 30
+            print(f"{self.class_prefix}, alpha_cum: {self.alpha_cum.mean()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}")
+        else:
+            pdf = pdf_unnorm
         return pdf
     
     @property
@@ -227,6 +242,7 @@ class VanillaGaussians(nn.Module):
             shs[:, 0, :3] = torch.logit(init_colors, eps=1e-10)
         self._features_dc = Parameter(shs[:, 0, :])
         self._features_rest = Parameter(shs[:, 1:, :])
+        self._uncertainty = Parameter(torch.randn(self.num_points, self.uncertainty_num_coeffs, 1, device=self.device))
         self._opacities = Parameter(torch.logit(init_opacity * torch.ones(self.num_points, 1, device=self.device)))
         self.from_lidar = from_lidar.float()
     
@@ -255,6 +271,7 @@ class VanillaGaussians(nn.Module):
             shs[:, 0, :3] = torch.logit(init_colors, eps=1e-10)
         new_features_dc = Parameter(shs[:, 0, :])
         new_features_rest = Parameter(shs[:, 1:, :])
+        new_uncertainty = Parameter(torch.zeros(new_means.shape[0], self.uncertainty_num_coeffs, 1, device=self.device))
         new_opacities = Parameter(torch.logit(init_opacity * torch.ones(new_means.shape[0], 1, device=self.device)))
         new_from_lidar = from_lidar.float()
         
@@ -263,6 +280,7 @@ class VanillaGaussians(nn.Module):
         self._quats = Parameter(torch.cat([self._quats.detach(), new_quats], dim=0))
         self._features_dc = Parameter(torch.cat([self._features_dc.detach(), new_features_dc], dim=0))
         self._features_rest = Parameter(torch.cat([self._features_rest.detach(), new_features_rest], dim=0))
+        self._uncertainty = Parameter(torch.cat([self._uncertainty.detach(), new_uncertainty], dim=0))
         self._opacities = Parameter(torch.cat([self._opacities.detach(), new_opacities], dim=0))
         self.from_lidar = torch.cat([self.from_lidar, new_from_lidar], dim=0)
         
@@ -317,10 +335,11 @@ class VanillaGaussians(nn.Module):
         optimizer: List[torch.optim.Optimizer],
         radii: torch.Tensor,
         xys_grad: torch.Tensor,
+        alphas: torch.Tensor,
         last_size: int,
         do_refinement: bool
     ) -> None:
-        self.after_train(radii, xys_grad, last_size)
+        self.after_train(radii, xys_grad, alphas, last_size)
         if step % self.ctrl_cfg.refine_interval == 0 and do_refinement:
             self.refinement_after(step, optimizer)
 
@@ -328,6 +347,7 @@ class VanillaGaussians(nn.Module):
         self,
         radii: torch.Tensor,
         xys_grad: torch.Tensor,
+        alphas: torch.Tensor,
         last_size: int,
     ) -> None:
         with torch.no_grad():
@@ -346,6 +366,15 @@ class VanillaGaussians(nn.Module):
                 self.vis_counts[full_mask] = self.vis_counts[full_mask] + 1
                 self.xys_grad_norm[full_mask] = grads[visible_mask] + self.xys_grad_norm[full_mask]
 
+
+            if self.alpha_cum is None:
+                self.alpha_cum = torch.zeros(self.num_points, device=grads.device, dtype=grads.dtype)
+                self.alpha_cnt = 0 
+                
+            self.alpha_cum[full_mask] += alphas[full_mask]
+            self.alpha_cnt += 1
+
+
             # update the max screen size, as a ratio of number of pixels
             if self.max_2Dsize is None:
                 self.max_2Dsize = torch.zeros(self.num_points, device=radii.device, dtype=torch.float32)
@@ -359,6 +388,7 @@ class VanillaGaussians(nn.Module):
             self.class_prefix+"xyz": [self._means],
             self.class_prefix+"sh_dc": [self._features_dc],
             self.class_prefix+"sh_rest": [self._features_rest],
+            self.class_prefix+"uncertainty": [self._uncertainty],
             self.class_prefix+"opacity": [self._opacities],
             self.class_prefix+"scaling": [self._scales],
             self.class_prefix+"rotation": [self._quats],
@@ -407,10 +437,12 @@ class VanillaGaussians(nn.Module):
                     split_means,
                     split_feature_dc,
                     split_feature_rest,
+                    split_uncertainty,
                     split_opacities,
                     split_scales,
                     split_quats,
-                    split_under_ground
+                    split_under_ground,
+                    split_alpha_cum
                 ) = self.split_gaussians(splits, nsamps)
 
                 dups = (
@@ -422,16 +454,19 @@ class VanillaGaussians(nn.Module):
                     dup_means,
                     dup_feature_dc,
                     dup_feature_rest,
+                    dup_uncertainty,
                     dup_opacities,
                     dup_scales,
                     dup_quats,
-                    dep_under_ground
+                    dep_under_ground,
+                    dup_alpha_cum
                 ) = self.dup_gaussians(dups)
                 
                 self._means = Parameter(torch.cat([self._means.detach(), split_means, dup_means], dim=0))
                 # self.colors_all = Parameter(torch.cat([self.colors_all.detach(), split_colors, dup_colors], dim=0))
                 self._features_dc = Parameter(torch.cat([self._features_dc.detach(), split_feature_dc, dup_feature_dc], dim=0))
                 self._features_rest = Parameter(torch.cat([self._features_rest.detach(), split_feature_rest, dup_feature_rest], dim=0))
+                self._uncertainty = Parameter(torch.cat([self._uncertainty.detach(), split_uncertainty, dup_uncertainty], dim=0))
                 self._opacities = Parameter(torch.cat([self._opacities.detach(), split_opacities, dup_opacities], dim=0))
                 self._scales = Parameter(torch.cat([self._scales.detach(), split_scales, dup_scales], dim=0))
                 self._quats = Parameter(torch.cat([self._quats.detach(), split_quats, dup_quats], dim=0))
@@ -443,6 +478,8 @@ class VanillaGaussians(nn.Module):
                     dim=0,
                 )
                 self.under_ground = torch.cat([self.under_ground, split_under_ground, dep_under_ground], dim=0)
+                import ipdb ; ipdb.set_trace()
+                self.alpha_cum = torch.cat([self.alpha_cum, split_alpha_cum, dup_alpha_cum], dim=0)
                 
                 split_idcs = torch.where(splits)[0]
                 param_groups = self.get_gaussian_param_groups()
@@ -527,6 +564,7 @@ class VanillaGaussians(nn.Module):
         # self.colors_all = Parameter(self.colors_all[~culls].detach())
         self._features_dc = Parameter(self._features_dc[~culls].detach())
         self._features_rest = Parameter(self._features_rest[~culls].detach())
+        self._uncertainty = Parameter(self._uncertainty[~culls].detach())
         self._opacities = Parameter(self._opacities[~culls].detach())
         self.from_lidar = self.from_lidar[~culls]
         
@@ -555,6 +593,7 @@ class VanillaGaussians(nn.Module):
         # new_colors_all = self.colors_all[split_mask].repeat(samps, 1, 1)
         new_feature_dc = self._features_dc[split_mask].repeat(samps, 1)
         new_feature_rest = self._features_rest[split_mask].repeat(samps, 1, 1)
+        new_feature_uncertainty = self._uncertainty[split_mask].repeat(samps, 1, 1)
         # step 3, sample new opacities
         new_opacities = self._opacities[split_mask].repeat(samps, 1)
         # step 4, sample new scales
@@ -564,7 +603,8 @@ class VanillaGaussians(nn.Module):
         # step 5, sample new quats
         new_quats = self._quats[split_mask].repeat(samps, 1)
         new_under_ground = self.under_ground[split_mask].repeat(samps, 1)
-        return new_means, new_feature_dc, new_feature_rest, new_opacities, new_scales, new_quats, new_under_ground
+        new_alpha_cum = self.alpha_cum[split_mask].repeat(samps, 1)
+        return new_means, new_feature_dc, new_feature_rest, new_feature_uncertainty, new_opacities, new_scales, new_quats, new_under_ground, new_alpha_cum
 
     def dup_gaussians(self, dup_mask: torch.Tensor) -> Tuple:
         """
@@ -576,11 +616,13 @@ class VanillaGaussians(nn.Module):
         # dup_colors = self.colors_all[dup_mask]
         dup_feature_dc = self._features_dc[dup_mask]
         dup_feature_rest = self._features_rest[dup_mask]
+        dup_uncertainty = self._uncertainty[dup_mask]
         dup_opacities = self._opacities[dup_mask]
         dup_scales = self._scales[dup_mask]
         dup_quats = self._quats[dup_mask]
         dup_under_ground = self.under_ground[dup_mask]
-        return dup_means, dup_feature_dc, dup_feature_rest, dup_opacities, dup_scales, dup_quats, dup_under_ground
+        dup_alpha_cum = self.alpha_cum[dup_mask]
+        return dup_means, dup_feature_dc, dup_feature_rest, dup_uncertainty, dup_opacities, dup_scales, dup_quats, dup_under_ground, dup_alpha_cum
     def generate_offset_points(self, points, offset=0.01):
         """
         Generate offset points by adding/subtracting offset to x,y coordinates
@@ -729,7 +771,7 @@ class VanillaGaussians(nn.Module):
         result = F.normalize(rotated_vector, p=2, dim=-1)
         
         return result
-    def get_gaussians(self, cam: dataclass_camera) -> Dict:
+    def get_gaussians(self, cam: dataclass_camera, is_uncertainty:bool=False) -> Dict:
         filter_mask = torch.ones_like(self._means[:, 0], dtype=torch.bool)
         self.filter_mask = filter_mask
         # collect gaussians information
@@ -757,7 +799,11 @@ class VanillaGaussians(nn.Module):
             rgbs = torch.sigmoid(colors[:, 0, :])
         
         # get view-dependent uncertainty
-        uncertainty_pdf = self.get_uncertainty(viewdirs)
+        if is_uncertainty:
+            uncertainty_pdf = self.get_uncertainty(viewdirs)
+            actovated_colors = uncertainty_pdf.unsqueeze(-1)
+        else:
+            actovated_colors = rgbs
 
         # if True:
         #     n_samples = 1_000_0000
@@ -779,7 +825,7 @@ class VanillaGaussians(nn.Module):
         activated_opacities = self.get_opacity
         activated_scales = self.get_scaling
         activated_rotations = self.get_quats
-        actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
+        # actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
         
         
         if self.ground_gs and os.environ.get("IS_CONT", "False") != "True":
@@ -834,6 +880,14 @@ class VanillaGaussians(nn.Module):
                     _rgbs=actovated_colors.detach(),
                     _scales=activated_scales.detach(),
                     _quats=activated_rotations.detach(),
+                )
+            elif is_uncertainty:
+                gs_dict = dict(
+                    _means=output_means[filter_mask].detach(),
+                    _opacities=activated_opacities[filter_mask].detach(),
+                    _rgbs=actovated_colors[filter_mask],
+                    _scales=activated_scales[filter_mask].detach(),
+                    _quats=activated_rotations[filter_mask].detach(),
                 )
             else:
                 gs_dict = dict(
@@ -927,6 +981,7 @@ class VanillaGaussians(nn.Module):
         self._quats = Parameter(torch.zeros((N,) + self._quats.shape[1:], device=self.device))
         self._features_dc = Parameter(torch.zeros((N,) + self._features_dc.shape[1:], device=self.device))
         self._features_rest = Parameter(torch.zeros((N,) + self._features_rest.shape[1:], device=self.device))
+        self._uncertainty = Parameter(torch.randn((N,) + self._uncertainty.shape[1:], device=self.device))
         self._opacities = Parameter(torch.zeros((N,) + self._opacities.shape[1:], device=self.device))
         self.from_lidar = torch.zeros(N, device=self.device)
         msg = super().load_state_dict(state_dict, strict=False)

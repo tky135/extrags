@@ -84,12 +84,14 @@ class DeformableNodes(RigidNodes):
             rgbs = torch.clamp(rgbs + 0.5, 0.0, 1.0)
         else:
             rgbs = torch.sigmoid(colors[:, 0, :])
-        
+        # get view-dependent uncertainty
+        uncertainty_pdf = self.get_uncertainty(viewdirs)
         valid_mask = self.get_pts_valid_mask()
             
         activated_opacities = self.get_opacity * valid_mask.float().unsqueeze(-1)
         activated_rotations = self.quat_act(world_quats)
-        actovated_colors = rgbs
+        actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
+        # actovated_colors = rgbs
         
         # collect gaussians information
         gs_dict = dict(

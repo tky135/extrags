@@ -71,7 +71,7 @@ class NuScenesCameraData(CameraData):
         
     def load_calibrations(self):
         cam_to_worlds, intrinsics, distortions = [], [], []
-        
+        sample_tokens, is_key_frames = [], []
         # Load the first camera (front) pose to align the world
         camera_front_start = np.loadtxt(
             os.path.join(self.data_path, "extrinsics", f"{self.start_timestep:03d}_0.txt")
@@ -102,7 +102,10 @@ class NuScenesCameraData(CameraData):
             cam2world = np.loadtxt(
                 os.path.join(self.data_path, "extrinsics", f"{t:03d}_{self.cam_id}.txt")
             )
-            
+
+            sample_token, is_key_frame = open(os.path.join(self.data_path, "tokens", f"{t:03d}_{self.cam_id}.txt")).read().strip().split(',')
+            sample_tokens.append(sample_token)
+            is_key_frames.append(is_key_frame == '1')
             # Align camera poses with the first camera pose
             cam2world = np.linalg.inv(camera_front_start) @ cam2world
             
@@ -113,6 +116,8 @@ class NuScenesCameraData(CameraData):
         self.intrinsics = torch.from_numpy(np.stack(intrinsics, axis=0)).float()
         self.distortions = torch.from_numpy(np.stack(distortions, axis=0)).float()
         self.cam_to_worlds = torch.from_numpy(np.stack(cam_to_worlds, axis=0)).float()
+        self.sample_tokens = sample_tokens
+        self.is_key_frames = is_key_frames
         
     @classmethod
     def get_camera2worlds(cls, data_path: str, cam_id: str, start_timestep: int, end_timestep: int) -> torch.Tensor:
@@ -170,6 +175,9 @@ class NuScenesPixelSource(ScenePixelSource):
         self.start_timestep = start_timestep
         self.end_timestep = end_timestep
         self.load_data()    # 会调用load_cameras和load_objects
+
+        # get keyframe timesteps
+        self.keyframe_timesteps = self._timesteps[self.camera_data[0].is_key_frames]
         
     def load_cameras(self):
         self._timesteps = torch.arange(self.start_timestep, self.end_timestep)
@@ -429,6 +437,7 @@ class NuScenesLiDARSource(SceneLidarSource):
         self.directions = torch.cat(directions, dim=0)
         self.ranges = torch.cat(ranges, dim=0)
         self.visible_masks = torch.zeros_like(self.ranges).squeeze().bool()
+        self.road_masks = torch.zeros_like(self.ranges).squeeze().bool()
         self.colors = torch.ones_like(self.directions)
 
         self._timesteps = torch.cat(timesteps, dim=0)
@@ -446,8 +455,21 @@ class NuScenesLiDARSource(SceneLidarSource):
             "lidar_normed_time": normalized_time,
             "lidar_mask": self.timesteps == time_idx,
         }
-        
+    def get_road_lidarpoints(self):
+        return self.road_point_neus
     def delete_invisible_pts(self) -> None:
+        if self.road_masks is not None:
+            road_origins = self.origins[self.road_masks]
+            road_directions = self.directions[self.road_masks]
+            road_ranges = self.ranges[self.road_masks]
+            
+            lidar_points = road_origins + road_directions * road_ranges
+            self.road_point_neus = lidar_points
+            # import open3d as o3d
+            # pc = o3d.geometry.PointCloud()
+            # pc.points = o3d.utility.Vector3dVector(lidar_points.cpu().numpy())
+            # o3d.io.write_point_cloud("lidar_points_road.pcd", pc)
+            self.road_masks = None
         if self.visible_masks is not None:
             num_bf = self.origins.shape[0]
             self.origins = self.origins[self.visible_masks]

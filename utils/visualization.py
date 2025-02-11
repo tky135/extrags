@@ -178,13 +178,13 @@ def layout_nuscenes(
         elif cam_name == "CAM_FRONT_RIGHT":
             tiled_img[:landscape_height, 2 * landscape_width :] = img
             filled_mask[:landscape_height, 2 * landscape_width :] = 1
-        elif cam_name == "CAM_BACK_LEFT":
+        elif cam_name == "CAM_BACK_RIGHT":
             tiled_img[landscape_height :, :landscape_width] = img
             filled_mask[landscape_height :, :landscape_width] = 1
         elif cam_name == "CAM_BACK":
             tiled_img[landscape_height :, landscape_width : 2 * landscape_width] = img
             filled_mask[landscape_height :, landscape_width : 2 * landscape_width] = 1
-        elif cam_name == "CAM_BACK_RIGHT":
+        elif cam_name == "CAM_BACK_LEFT":
             tiled_img[landscape_height :, 2 * landscape_width :] = img
             filled_mask[landscape_height :, 2 * landscape_width :] = 1
     

@@ -10,6 +10,10 @@ from typing import Tuple, Dict
 from torch.utils.data import DataLoader
 import heapq
 
+UNLIMITED = 100_0000
+key_frame_limit = 20 * 6
+
+
 class SplitWrapper(torch.utils.data.IterableDataset):
     def __init__(
         self,
@@ -22,7 +26,7 @@ class SplitWrapper(torch.utils.data.IterableDataset):
         self.datasource = datasource
         self.split_indices = split_indices
         self.split = split
-        self.modes2idx = {"random": 0, "sequential": 1}
+        self.modes2idx = {"random": 0, "sequential": 1, "sequential_infinite": 2}
         self._shared_index = mp.Value('i', 0)
         self._camera_downscale = mp.Value('d', camera_downscale)
         self._camera_downscale_lock = mp.Lock()
@@ -68,7 +72,7 @@ class SplitWrapper(torch.utils.data.IterableDataset):
             persistent_workers=False,
             shuffle=False
         ))
-        elif self._mode.value == 1:
+        elif self._mode.value in [1, 2]:
             # reset test iterator
             self.reset_test_iterator()
             # For test mode, we need to maintain order
@@ -139,6 +143,8 @@ class SplitWrapper(torch.utils.data.IterableDataset):
             return self._generate_random_samples()
         elif self._mode.value == 1:
             return self._generate_sequential_samples()
+        elif self._mode.value == 2:
+            return self._generate_sequential_samples_infinite()
         else:
             import ipdb ; ipdb.set_trace()
             raise Exception("Invalid mode")
@@ -153,7 +159,7 @@ class SplitWrapper(torch.utils.data.IterableDataset):
             
             downscale_factor = 1 / current_downscale * self.datasource.downscale_factor
             self.datasource.update_downscale_factor(downscale_factor)
-            image_infos, cam_infos = self.datasource.get_image(img_idx)
+            image_infos, cam_infos = self.datasource.get_image(img_idx % (key_frame_limit * 5))
             self.datasource.reset_downscale_factor()
             
             yield image_infos, cam_infos
@@ -171,7 +177,28 @@ class SplitWrapper(torch.utils.data.IterableDataset):
             
             downscale_factor = 1 / current_downscale * self.datasource.downscale_factor
             self.datasource.update_downscale_factor(downscale_factor)
-            image_infos, cam_infos = self.datasource.get_image(self.split_indices[self.available_indices[current_idx]])
+            image_infos, cam_infos = self.datasource.get_image(self.split_indices[self.available_indices[current_idx % (key_frame_limit * 5)]])
+            self.datasource.reset_downscale_factor()
+            
+            # Add sequence index to outputs
+            image_infos['_sequence_idx'] = current_idx
+            
+            yield image_infos, cam_infos
+    
+    def _generate_sequential_samples_infinite(self):
+        while True:
+            with self._shared_index.get_lock():
+                current_idx = self._shared_index.value
+                # if current_idx >= len(self.available_indices):
+                #     break
+                self._shared_index.value = current_idx + 1
+            # if current_idx >= len(self.available_indices):
+            #     break
+            current_downscale = self.camera_downscale
+            
+            downscale_factor = 1 / current_downscale * self.datasource.downscale_factor
+            self.datasource.update_downscale_factor(downscale_factor)
+            image_infos, cam_infos = self.datasource.get_image(self.split_indices[self.available_indices[(current_idx % key_frame_limit) % len(self.available_indices)]])
             self.datasource.reset_downscale_factor()
             
             # Add sequence index to outputs

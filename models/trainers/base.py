@@ -179,17 +179,24 @@ class BasicTrainer(nn.Module):
     
     def initialize_optimizer(self) -> None:
         # get param groups first
-        self.param_groups = {}
+        self.param_groups_diffusion = {}
         for class_name, model in self.models.items():
+            if class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus', 'DeformableNodes', 'Background', 'Sky']:
+                continue
             if os.environ.get("IS_CONT") == "True" and class_name in ['CamPose', 'Ground']:
                 continue
-            self.param_groups.update(model.get_param_groups())
+            self.param_groups_diffusion.update(model.get_param_groups())
                  
-        groups = []
-        lr_schedulers = {}
-        for params_name, params in self.param_groups.items():
+        groups_diffusion = []
+        lr_schedulers_diffusion = {}
+
+
+        # 0130: affine and ground and pose not optimizing
+        for params_name, params in self.param_groups_diffusion.items():
             class_name = params_name.split("#")[0]
             component_name = params_name.split("#")[1]
+            # if component_name in ['sh_rest', 'ins_rotation', 'ins_translation']:
+            #     continue
             class_cfg = self.model_config.get(class_name)
             class_optim_cfg = class_cfg["optim"]
             
@@ -207,7 +214,7 @@ class BasicTrainer(nn.Module):
             optim_cfg.lr = optim_cfg.lr * lr_scale_factor
             assert optim_cfg is not None, f"param group {params_name} not found in config"
             lr_init = optim_cfg.lr
-            groups.append({
+            groups_diffusion.append({
                 'params': params,
                 'name': params_name,
                 'lr': optim_cfg.lr,
@@ -229,10 +236,77 @@ class BasicTrainer(nn.Module):
                 sched_cfg.lr_final = sched_cfg.lr_final * lr_scale_factor if sched_cfg.lr_final is not None else None
                 # adjust max_steps to account for opt_after
                 sched_cfg.max_steps = sched_cfg.max_steps - sched_cfg.opt_after
-                lr_schedulers[params_name] = lr_scheduler_fn(sched_cfg, lr_init)
+                lr_schedulers_diffusion[params_name] = lr_scheduler_fn(sched_cfg, lr_init)
 
-        self.optimizer = torch.optim.Adam(groups, lr=0.0, eps=1e-15)
-        self.lr_schedulers = lr_schedulers
+        self.optimizer_diffusion = torch.optim.Adam(groups_diffusion, lr=0.0, eps=1e-15)
+        self.lr_schedulers_diffusion = lr_schedulers_diffusion
+
+
+
+
+        # get param groups first
+        self.param_groups_all = {}
+        for class_name, model in self.models.items():
+            if os.environ.get("IS_CONT") == "True" and class_name in ['CamPose', 'Ground']:
+                continue
+            self.param_groups_all.update(model.get_param_groups())
+                 
+        groups_all = []
+        lr_schedulers_all = {}
+
+
+        # 0130: affine and ground and pose not optimizing
+        for params_name, params in self.param_groups_all.items():
+            class_name = params_name.split("#")[0]
+            component_name = params_name.split("#")[1]
+            class_cfg = self.model_config.get(class_name)
+            class_optim_cfg = class_cfg["optim"]
+            
+            raw_optim_cfg = class_optim_cfg.get(component_name, None)
+            lr_scale_factor = raw_optim_cfg.get("scale_factor", 1.0)
+            if isinstance(lr_scale_factor, str) and lr_scale_factor == "scene_radius":
+                # scale the spatial learning rate to scene scale
+                lr_scale_factor = self.scene_radius
+
+            optim_cfg = OmegaConf.create({
+                "lr": raw_optim_cfg.get('lr', 0.0005),
+                "eps": raw_optim_cfg.get('eps', 1.0e-15),
+                "weight_decay": raw_optim_cfg.get('weight_decay', 0),
+            })
+            optim_cfg.lr = optim_cfg.lr * lr_scale_factor
+            assert optim_cfg is not None, f"param group {params_name} not found in config"
+            lr_init = optim_cfg.lr
+            groups_all.append({
+                'params': params,
+                'name': params_name,
+                'lr': optim_cfg.lr,
+                'eps': optim_cfg.eps,
+                'weight_decay': optim_cfg.weight_decay
+            })
+            
+            if raw_optim_cfg.get("lr_final", None) is not None:
+                sched_cfg = OmegaConf.create({
+                    "opt_after": raw_optim_cfg.get('opt_after', 0),
+                    "warmup_steps": raw_optim_cfg.get('warmup_steps', 0),
+                    "max_steps": raw_optim_cfg.get('max_steps', self.num_iters),
+                    "lr_pre_warmup": raw_optim_cfg.get('lr_pre_warmup', 1.0e-8),
+                    "lr_final": raw_optim_cfg.get('lr_final', None),
+                    "ramp": raw_optim_cfg.get('ramp', "cosine"),
+                })
+                # scale the learning rate according to the scene scale
+                sched_cfg.lr_pre_warmup = sched_cfg.lr_pre_warmup * lr_scale_factor
+                sched_cfg.lr_final = sched_cfg.lr_final * lr_scale_factor if sched_cfg.lr_final is not None else None
+                # adjust max_steps to account for opt_after
+                sched_cfg.max_steps = sched_cfg.max_steps - sched_cfg.opt_after
+                lr_schedulers_all[params_name] = lr_scheduler_fn(sched_cfg, lr_init)
+
+        self.optimizer_all = torch.optim.Adam(groups_all, lr=0.0, eps=1e-15)
+        self.lr_schedulers_all = lr_schedulers_all
+
+
+
+
+
         self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.optim_general.get("use_grad_scaler", False))
     
     def _init_losses(self) -> None:
@@ -257,10 +331,14 @@ class BasicTrainer(nn.Module):
             )
         self.depth_loss_fn = depth_loss_fn
     
-    def optimizer_zero_grad(self) -> None:
-        self.optimizer.zero_grad()
+    def optimizer_zero_grad(self, is_diffusion_step) -> None:
+        if not is_diffusion_step:
+            self.optimizer_all.zero_grad()
+        else:
+            self.optimizer_diffusion.zero_grad()
+
     
-    def optimizer_step(self) -> None:
+    def optimizer_step(self, is_diffusion_step) -> None:
         # for params_name, optimizer in self.optimizers.items():
         #     class_name = params_name.split("#")[0]
         #     component_name = params_name.split("#")[1]
@@ -270,7 +348,10 @@ class BasicTrainer(nn.Module):
         #         torch.nn.utils.clip_grad_norm_(self.param_groups[params_name], max_norm)
         #     if any(any(p.grad is not None for p in g["params"]) for g in optimizer.param_groups):
         #         self.grad_scaler.step(optimizer)
-        self.optimizer.step()
+        if not is_diffusion_step:
+            self.optimizer_all.step()
+        else:
+            self.optimizer_diffusion.step()
 
     def preprocess_per_train_step(self, step: int) -> None:
         self.step = step
@@ -298,7 +379,7 @@ class BasicTrainer(nn.Module):
                     raise Exception("No Ground or SDF model found")
                 underground_mask = sdf < -1
                 self.models[class_name].under_ground = underground_mask
-    def postprocess_per_train_step(self, step: int) -> None:
+    def postprocess_per_train_step(self, step: int, diff_grad=False, do_refinement=True) -> None:
         if self.step < self.lidar_pretrain_iters:
             return
         if self.step == self.lidar_pretrain_iters:
@@ -381,13 +462,15 @@ class BasicTrainer(nn.Module):
                     )
             else:
                 gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
-            
+                if self.step > self.diff_start and class_name not in ['RigidNodes']:
+                    continue
                 self.models[class_name].postprocess_per_train_step(
                     step=step,
-                    optimizer=self.optimizer,
+                    optimizer=[self.optimizer_all, self.optimizer_diffusion],
                     radii=radii[0, gaussian_mask],
-                    xys_grad=grads[0, gaussian_mask],
-                    last_size=max(self.info["width"], self.info["height"])
+                    xys_grad=grads[0, gaussian_mask] * 0.1 if diff_grad else grads[0, gaussian_mask],
+                    last_size=max(self.info["width"], self.info["height"]),
+                    do_refinement=do_refinement
                 )
         
         # viewer
@@ -528,12 +611,11 @@ class BasicTrainer(nn.Module):
                 renders = renders[0]
                 alphas = alphas[0].squeeze(-1)
                 assert self.render_cfg.batch_size == 1, "batch size must be 1, will support batch size > 1 in the future"
-                
-                assert renders.shape[-1] == 4, f"Must render rgb, depth and alpha"
-                rendered_rgb, rendered_depth = torch.split(renders, [3, 1], dim=-1)
-                
+                assert renders.shape[-1] == 5, f"Must render rgb, depth and alpha"
+                rendered_rgb, rendered_uncertainty, rendered_depth = torch.split(renders, [3, 1, 1], dim=-1)
                 output = {
                     'rgb_gaussians': torch.clamp(rendered_rgb, max=1.0),
+                    'uncertainty': rendered_uncertainty,
                     'depth': rendered_depth,
                     'opacity': alphas[..., None]
                 }
@@ -673,23 +755,30 @@ class BasicTrainer(nn.Module):
         
         return outputs
     
-    def backward(self, loss_dict: Dict[str, torch.Tensor]) -> None:
+    def backward(self, loss_dict: Dict[str, torch.Tensor], is_diffusion_step) -> None:
         # ----------------- backward ----------------
         if len(loss_dict) == 0:
             return
         total_loss = sum(loss for loss in loss_dict.values())
         self.grad_scaler.scale(total_loss).backward()
-        self.optimizer_step()
+        self.optimizer_step(is_diffusion_step=is_diffusion_step)
         
         scale = self.grad_scaler.get_scale()
         self.grad_scaler.update()
         
         # If the gradient scaler is decreased, no optimization step is performed so we should not step the scheduler.
         if scale <= self.grad_scaler.get_scale():
-            for group in self.optimizer.param_groups:
-                if group["name"] in self.lr_schedulers:
-                    new_lr = self.lr_schedulers[group["name"]](self.step)
-                    group["lr"] = new_lr
+            if not is_diffusion_step:
+                for group in self.optimizer_all.param_groups:
+                    if group["name"] in self.lr_schedulers_all:
+                        new_lr = self.lr_schedulers_all[group["name"]](self.step)
+                        group["lr"] = new_lr
+            else:
+                for group in self.optimizer_diffusion.param_groups:
+                    if group["name"] in self.lr_schedulers_diffusion:
+                        new_lr = self.lr_schedulers_diffusion[group["name"]](self.step)
+                        group["lr"] = new_lr
+                
                 
     def compute_losses(
         self,
@@ -868,6 +957,12 @@ class BasicTrainer(nn.Module):
                 loss_dict.update({
                     "align_error": align_error * self.losses_dict.align_error.w
                 })
+
+        # update uncertainty
+        # uncertainty_loss = torch.nn.functional.mse_loss(outputs['3dgs']['uncertainty'], outputs['3dgs']['opacity'].detach(), reduction='mean')
+        # loss_dict.update({
+        #     "uncertainty_loss": uncertainty_loss
+        # })
         if image_infos['is_pseudo']:
             raise Exception("Not Implemented")
         return loss_dict

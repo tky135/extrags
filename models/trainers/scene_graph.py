@@ -11,6 +11,7 @@ from warp import warp_image
 import os
 import numpy as np
 import torchvision
+from guidance import MagicDrive
 logger = logging.getLogger()
 
 class MultiTrainer(BasicTrainer):
@@ -22,8 +23,10 @@ class MultiTrainer(BasicTrainer):
         self.num_timesteps = num_timesteps
         self.log_dir = kwargs['log_dir']
         self.dataset = kwargs['dataset']
+        self.scene_idx = int(kwargs['scene_idx'])
         self.dataset_obj = kwargs['dataset_obj']
         self.ground_method = kwargs['ground_method']
+        self.version = kwargs['version']
         self.n_camera = kwargs['n_camera']
         
         self.export_neus_2dgs = kwargs.get('export_neus_2dgs', False)
@@ -47,7 +50,11 @@ class MultiTrainer(BasicTrainer):
         logger.info(f"Camera height: {self.cam_height}")
         super().__init__(**kwargs)
         self.render_each_class = True
-        
+
+
+        self.mgd = MagicDrive(sd_path="pretrained/stable-diffusion-v1-5", checkpoint_path="pretrained/SDv1.5mv-rawbox_2023-09-07_18-39_224x400", version=self.version)
+        self.mgd.prepare_data_pipeline()
+
     def neus23dgs(self, output=False):
         if 'Ground' not in self.models.keys():
             return
@@ -135,7 +142,7 @@ class MultiTrainer(BasicTrainer):
                 model = import_str(model_cfg.type)(
                     class_name=class_name,
                     **model_cfg.get('params', {}),
-                    n=5,
+                    n=self.n_camera,
                     device=self.device
                 ).to(self.device)
             else:
@@ -215,6 +222,7 @@ class MultiTrainer(BasicTrainer):
                 elif pretrain_method == 'lidar':
                     # lidar 初始化
                     road_lidar_pts = dataset.lidar_source.get_road_lidarpoints()
+                    road_lidar_pts = road_lidar_pts @ self.omnire_w2neus_w[:3, :3].T + self.omnire_w2neus_w[:3, 3]
                     
                     self.models['Ground'].pretrain_sdf_lidar(road_lidar_pts)
                 else:
@@ -353,7 +361,8 @@ class MultiTrainer(BasicTrainer):
         self, 
         image_infos: Dict[str, torch.Tensor],
         camera_infos: Dict[str, torch.Tensor],
-        novel_view: bool = False
+        novel_view: bool = False,
+        is_diffusion_step: bool = False
     ) -> Dict[str, torch.Tensor]:
         """Forward pass of the model
 
@@ -502,7 +511,7 @@ class MultiTrainer(BasicTrainer):
             is_ground=False
         )
         outputs['3dgs'] = outputs_3dgs
-        
+
         # render sky
         sky_model = self.models['Sky']
         outputs["rgb_sky"] = sky_model(image_infos, camera_infos)
@@ -561,6 +570,37 @@ class MultiTrainer(BasicTrainer):
                         outputs[class_name+"_depth"] = sep_depth
                     else:
                         continue
+        
+        if is_diffusion_step is True:
+            # get inpainting mask
+            # for now treat rigid mask as inpainting mask
+            with torch.no_grad():
+                for class_name in self.gaussian_classes.keys():
+                    if class_name != 'Ground_gs':
+                        gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
+                        sep_result = render_fn(gaussian_mask)
+                        sep_rgb, sep_depth, sep_opacity = sep_result['rgb_gaussians'], sep_result['depth'], sep_result['opacity']
+                        outputs[class_name+"_rgb"] = self.affine_transformation(sep_rgb, image_infos, camera_infos)
+                        outputs[class_name+"_opacity"] = sep_opacity
+                        outputs[class_name+"_depth"] = sep_depth
+                    else:
+                        continue
+            # img_idx = image_infos['img_idx'].flatten()[0]
+            # rigid_opacity = outputs['RigidNodes_opacity'].permute(2, 0, 1).repeat(3, 1, 1)
+            # rigid_opacity = (rigid_opacity > 0.1).float()
+            # rigid_opacity = rigid_opacity.cpu().detach() * 255
+            # rigid_opacity = rigid_opacity.type(torch.uint8)
+
+            # rigid_rgb = outputs['rgb'].permute(2, 0, 1).cpu().detach() * 255
+            # rigid_rgb = rigid_rgb.type(torch.uint8)
+
+            # if not os.path.exists("inpainting_mask"):
+            #     os.makedirs("inpainting_mask")
+            # if not os.path.exists("inpainting_rgb"):
+            #     os.makedirs("inpainting_rgb")
+            # torchvision.io.write_png(rigid_opacity, f"inpainting_mask/{img_idx}.png")
+            # torchvision.io.write_png(rigid_rgb, f"inpainting_rgb/{img_idx}.png")
+            # torchvision.io.write_png(rigid_opacity, f"rigid_opacity_{img_idx}.png")
 
         if not self.training or self.render_dynamic_mask:
             with torch.no_grad():
@@ -570,7 +610,8 @@ class MultiTrainer(BasicTrainer):
                 outputs["Dynamic_rgb"] = self.affine_transformation(sep_rgb, image_infos, camera_infos)
                 outputs["Dynamic_opacity"] = sep_opacity
                 outputs["Dynamic_depth"] = sep_depth
-        if (self.step % 100 == 0) and self.training:
+        if ((self.step % 100 == 1) and self.training):# or is_diffusion_step:
+        # if ((self.step % 100 == 1) and self.training) or is_diffusion_step:
             with torch.no_grad():
                 write_rgb = outputs['rgb'].detach().cpu() * 255
                 
@@ -620,6 +661,8 @@ class MultiTrainer(BasicTrainer):
             depth_gt_vis = depth_to_rgb(image_infos['lidar_depth_map'].squeeze(), min_val=0, max_val=100)
             image_infos['depth_blend'] = depth_blend_vis
             image_infos['depth_gt'] = depth_gt_vis
+            image_infos['uncertainty'] = outputs['3dgs']['uncertainty'].detach().cpu().repeat(1, 1, 3)
+            image_infos['opacity'] = outputs['3dgs']['opacity'].detach().cpu().repeat(1, 1, 3)
             self.models['Ground'].validate_image(image_infos, camera_infos)
             if self.step % 10000 == 0 and self.step > 0 and self.training:
                 self.models['Ground'].validate_mesh()
@@ -668,7 +711,7 @@ class MultiTrainer(BasicTrainer):
             normals = np.zeros_like(xyz)
             f_dc = gs_model._features_dc.detach().contiguous().cpu().numpy()
             f_rest = gs_model._features_rest.detach().contiguous().permute(0, 2, 1).cpu().numpy().reshape(N, -1)
-            f_rest = np.concatenate([f_rest, np.ones((f_rest.shape[0], 45 - f_rest.shape[1]))], axis=1)
+            f_rest = np.concatenate([f_rest, np.zeros((f_rest.shape[0], 45 - f_rest.shape[1]))], axis=1)
 
             opacities = gs_model._opacities.detach().cpu().numpy()
             scale = gs_model._scales.detach().cpu().numpy()

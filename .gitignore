@@ -10,3 +10,12 @@ __pycache__/
 /third_party/
 /workerdir*/
 /*ipynb
+/2025*/
+/recon_*/
+*.ply
+/pretrained/
+*.pth
+*.pt 
+.vscode/
+/inpaint*/
+/experiments/

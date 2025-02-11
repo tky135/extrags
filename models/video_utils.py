@@ -75,6 +75,7 @@ def render(
     compute_error_map: bool = False,
     vis_indices: Optional[List[int]] = None,
     lane_shift: bool = False,
+    shift_x: float = 3.0
 ):
     """
     Renders a dataset utilizing a specified render function.
@@ -110,7 +111,8 @@ def render(
     
     
     # dataset setup
-    indices = list(range(len(dataset))) if vis_indices is None else vis_indices
+    
+    indices = list(range(len(dataset.split_indices))) if vis_indices is None else vis_indices
     dataset.mode = "sequential"
     dataset.camera_downscale = camera_downscale
     dataset.available_indices = indices
@@ -118,6 +120,8 @@ def render(
 
     for i in tqdm(indices, desc=f"rendering {dataset.split}", dynamic_ncols=True):
         image_infos, cam_infos = next(dataiter)
+        if lane_shift:
+            cam_infos['camera_to_world'][0, 0, 3] -= shift_x
         if os.environ.get("DATASET") == 'kitti360/4cams' and cam_infos['cam_id'].flatten()[0].item() >= 1:
             continue
         for k, v in image_infos.items():
@@ -333,6 +337,11 @@ def render(
                             save_path.replace(".mp4", f"_{k}/{num_frames:03d}_.png"),
                             frame,
                         )
+                        for cam_name, cam_frame in zip(output_dict['cam_names'], cam_frames):
+                            imageio.imwrite(
+                                save_path.replace(".mp4", f"_{k}/{num_frames:03d}_{cam_name}.png"),
+                                to8b(cam_frame),
+                            )
                 except Exception as e:
                     print(e)
                     import ipdb ; ipdb.set_trace()
@@ -344,7 +353,7 @@ def render(
     metrics_dict["psnr"] = non_zero_mean(psnrs) if compute_metrics else -1
     metrics_dict["ssim"] = non_zero_mean(ssim_scores) if compute_metrics else -1
     metrics_dict["lpips"] = non_zero_mean(lpipss) if compute_metrics else -1
-    # metrics_dict["fid"] = fid.compute().item() if compute_metrics else -1
+    metrics_dict["fid"] = fid.compute().item() if compute_metrics else -1
     metrics_dict["occupied_psnr"] = non_zero_mean(occupied_psnrs) if compute_metrics else -1
     metrics_dict["occupied_ssim"] = non_zero_mean(occupied_ssims) if compute_metrics else -1
     metrics_dict["masked_psnr"] = non_zero_mean(masked_psnrs) if compute_metrics else -1
@@ -360,7 +369,7 @@ def render(
     logger.info(f"\t Full Image  PSNR: {metrics_dict['psnr']:.4f}")
     logger.info(f"\t Full Image  SSIM: {metrics_dict['ssim']:.4f}")
     logger.info(f"\t Full Image LPIPS: {metrics_dict['lpips']:.4f}")
-    # logger.info(f"\t              FID: {metrics_dict['fid']:.4f}")
+    logger.info(f"\t              FID: {metrics_dict['fid']:.4f}")
     logger.info(f"\t     Non-Sky PSNR: {metrics_dict['occupied_psnr']:.4f}")
     logger.info(f"\t     Non-Sky SSIM: {metrics_dict['occupied_ssim']:.4f}")
     logger.info(f"\tDynamic-Only PSNR: {metrics_dict['masked_psnr']:.4f}")

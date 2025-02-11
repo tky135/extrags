@@ -737,6 +737,10 @@ class CameraData(object):
             "egocar_masks": egocar_mask,
             "lidar_depth_map": lidar_depth_map,
         }
+        if hasattr(self, "sample_tokens"):
+            _image_infos["sample_tokens"] = self.sample_tokens[frame_idx]
+        if hasattr(self, "is_key_frames"):
+            _image_infos["is_key_frame"] = self.is_key_frames[frame_idx]
         image_infos = {k: v for k, v in _image_infos.items() if v is not None}
         
         cam_infos = {

@@ -83,7 +83,7 @@ class DrivingDataset(SceneDataset):
         #   PandaSet: 6 Cameras
         #   NuPlan:   8 Cameras
         self.type = self.data_cfg.dataset   # 'nuscenes'
-        if self.type in ['pandaset', 'kitti360', 'waymo']: # For Waymo, NuScenes, ArgoVerse, PandaSet
+        if self.type in ['pandaset', 'kitti360', 'waymo', 'nuscenes']: # For Waymo, NuScenes, ArgoVerse, PandaSet
             self.data_path = os.path.join(
                 self.data_cfg.data_root,    # 'data/nuscenes/processed_10Hz/mini'
                 f"{int(self.scene_idx):03d}"
@@ -152,13 +152,15 @@ class DrivingDataset(SceneDataset):
         (
             self.train_timesteps,
             self.test_timesteps,
+            self.keyframe_timesteps,
             self.train_indices,
             self.test_indices,
+            self.keyframe_indices
         ) = self.split_train_test()
 
         # ---- create split wrappers ---- #
         image_sets = self.build_split_wrapper()
-        self.train_image_set, self.test_image_set, self.full_image_set = image_sets # 给train.py 的接口
+        self.train_image_set, self.test_image_set, self.full_image_set, self.diff_image_set = image_sets # 给train.py 的接口
         
         # debug use
         # self.seg_dynamic_instances_in_lidar_frame(-1, frame_idx=0)
@@ -201,7 +203,12 @@ class DrivingDataset(SceneDataset):
                 split_indices=self.test_indices,
                 split="test",
             )
-        image_sets = (train_image_set, test_image_set, full_image_set)
+        diff_image_set = SplitWrapper(
+            datasource=self.pixel_source,
+            split_indices=self.keyframe_indices,
+            split="diff"
+        )
+        image_sets = (train_image_set, test_image_set, full_image_set, diff_image_set)
         return image_sets
 
     def build_data_source(self):
@@ -696,6 +703,9 @@ class DrivingDataset(SceneDataset):
             )
         else:
             test_timesteps = []
+            train_timesteps = np.array(
+                [i for i in range(self.num_img_timesteps) if i not in test_timesteps]
+            )
         if self.type in ['multibag']:
             train_timesteps = np.array(
                 [i for i in range(self.num_img_timesteps) if i not in test_timesteps]
@@ -707,8 +717,11 @@ class DrivingDataset(SceneDataset):
             #     f"Test timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[test_timesteps]}"
             # )
 
+        keyframe_timesteps = self.pixel_source.keyframe_timesteps
+
         # propagate the train and test timesteps to the train and test indices
         train_indices, test_indices = [], []
+        keyframe_indices = []
         cam_num = self.pixel_source.num_cams if self.type not in ['multibag'] else self.pixel_source.num_cams_per_bag
         for t in range(self.num_img_timesteps):
             if t in train_timesteps:
@@ -717,15 +730,23 @@ class DrivingDataset(SceneDataset):
             elif t in test_timesteps:
                 for cam in range(cam_num):
                     test_indices.append(t * cam_num + cam)
+            if t in keyframe_timesteps:
+                for cam in range(cam_num):
+                    keyframe_indices.append(t * cam_num + cam)
+                
+
+        
         logger.info(f"Number of train indices: {len(train_indices)}")
         logger.info(f"Train indices: {train_indices}")
         logger.info(f"Number of test indices: {len(test_indices)}")
         logger.info(f"Test indices: {test_indices}")
+        logger.info(f"Number of keyframe indices: {len(keyframe_indices)}")
+        logger.info(f"Keyframe indices: {keyframe_indices}")
 
         # Again, training and testing indices are indices into the full dataset
         # train_indices are img indices, so the length is num_cams * num_train_timesteps
         # but train_timesteps are timesteps, so the length is num_train_timesteps (len(unique_train_timestamps))
-        return train_timesteps, test_timesteps, train_indices, test_indices
+        return train_timesteps, test_timesteps, keyframe_timesteps, train_indices, test_indices, keyframe_indices
     
     def project_lidar_pts_on_images(self, delete_out_of_view_points=True):
         """
@@ -796,6 +817,8 @@ class DrivingDataset(SceneDataset):
 
                 valid_mask = valid_mask_clone
                 valid_mask_on_road = valide_mask_clone_on_road
+                
+                valid_mask = valid_mask | valid_mask_on_road
                 
                 depth = depth[valid_mask]
                 _cam_points = cam_points[valid_mask]

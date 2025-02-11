@@ -355,6 +355,8 @@ class NuScenesProcessor(object):
         return closest_tokens
     
     def find_closest_img_tokens(self, scene_data, timestamps: List[int], cam_name):
+
+        # the input timestamps are from interpolated + keyframe timestamps
         """Find the closest image tokens for given timestamps for a specific camera."""
         first_sample_token = scene_data['first_sample_token']
         first_sample_record = self.nusc.get('sample', first_sample_token)
@@ -366,7 +368,11 @@ class NuScenesProcessor(object):
         img_tokens = []
         current_img = img_data
         while True:
-            img_timestamps.append(current_img['timestamp'])
+            if current_img['is_key_frame']:
+                key_frame_sample = self.nusc.get('sample', current_img['sample_token'])
+                img_timestamps.append(key_frame_sample['timestamp'])
+            else:
+                img_timestamps.append(current_img['timestamp'])
             img_tokens.append(current_img['token'])
             if current_img['next'] == '':
                 break
@@ -479,6 +485,7 @@ class NuScenesProcessor(object):
             
             for frame_idx, token in enumerate(closest_tokens):
                 cam_data = self.nusc.get('sample_data', token)
+                sample_token = cam_data['sample_token']
                 calib_data = self.nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
                 
                 # Extrinsics (camera to ego)
@@ -500,6 +507,14 @@ class NuScenesProcessor(object):
                     f"{str(frame_idx).zfill(3)}_{str(cam_idx)}.txt",
                     extrinsics_cam_to_world
                 )
+
+                with open(
+                    f"{self.save_dir}/{str(scene_idx).zfill(3)}/tokens/"
+                    f"{str(frame_idx).zfill(3)}_{str(cam_idx)}.txt",
+                'w') as f:
+                    f.write(sample_token)
+                    f.write(',')
+                    f.write(str(int(cam_data['is_key_frame'])))
                 
                 # Intrinsics
                 intrinsics = np.array(calib_data['camera_intrinsic'])
@@ -1071,6 +1086,7 @@ class NuScenesProcessor(object):
                 os.makedirs(f"{self.save_dir}/{str(i).zfill(3)}/sky_masks", exist_ok=True)
             if "calib" in self.process_keys:
                 os.makedirs(f"{self.save_dir}/{str(i).zfill(3)}/extrinsics", exist_ok=True)
+                os.makedirs(f"{self.save_dir}/{str(i).zfill(3)}/tokens", exist_ok=True)
                 os.makedirs(f"{self.save_dir}/{str(i).zfill(3)}/intrinsics", exist_ok=True)
             if "lidar" in self.process_keys:
                 os.makedirs(f"{self.save_dir}/{str(i).zfill(3)}/lidar", exist_ok=True)

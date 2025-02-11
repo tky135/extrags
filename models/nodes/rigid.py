@@ -121,7 +121,7 @@ class RigidNodes(VanillaGaussians):
         quats[~valid_mask, 0] = 1.0
         return quats.reshape(num_frames, num_instances, 4)
 
-    def refinement_after(self, step: int, optimizer: torch.optim.Optimizer) -> None:
+    def refinement_after(self, step: int, optimizer: List[torch.optim.Optimizer]) -> None:
         assert step == self.step
         if self.step <= self.ctrl_cfg.warmup_steps:
             return
@@ -130,7 +130,8 @@ class RigidNodes(VanillaGaussians):
             reset_interval = self.ctrl_cfg.reset_alpha_interval
             do_densification = (
                 self.step < self.ctrl_cfg.stop_split_at
-                and self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval)
+                and self.step % reset_interval > max(300, self.ctrl_cfg.refine_interval)
+                # and self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval)
             )
             # split & duplicate
             print(f"Class {self.class_prefix} current points: {self.num_points} @ step {self.step}")
@@ -190,18 +191,21 @@ class RigidNodes(VanillaGaussians):
                 
                 split_idcs = torch.where(splits)[0]
                 param_groups = self.get_gaussian_param_groups()
-                dup_in_optim(optimizer, split_idcs, param_groups, n=nsamps)
+                for opt in optimizer:
+                    dup_in_optim(opt, split_idcs, param_groups, n=nsamps)
 
                 dup_idcs = torch.where(dups)[0]
                 param_groups = self.get_gaussian_param_groups()
-                dup_in_optim(optimizer, dup_idcs, param_groups, 1)
+                for opt in optimizer:
+                    dup_in_optim(opt, dup_idcs, param_groups, 1)
 
             # cull NOTE: Offset all the opacity reset logic by refine_every so that we don't
                 # save checkpoints right when the opacity is reset (saves every 2k)
             if self.step % reset_interval > max(self.num_train_images, self.ctrl_cfg.refine_interval):
                 deleted_mask = self.cull_gaussians()
                 param_groups = self.get_gaussian_param_groups()
-                remove_from_optim(optimizer, deleted_mask, param_groups)
+                for opt in optimizer:
+                    remove_from_optim(opt, deleted_mask, param_groups)
             print(f"Class {self.class_prefix} left points: {self.num_points}")
 
             # reset opacity
@@ -210,14 +214,16 @@ class RigidNodes(VanillaGaussians):
                     # we align to original repo of gaussians spalting
                 reset_value = torch.min(self.get_opacity.data,
                                         torch.ones_like(self._opacities.data) * self.ctrl_cfg.reset_alpha_value)
-                self._opacities.data = torch.logit(reset_value)
+                # self._opacities.data = torch.logit(reset_value)
                 # reset the exp of optimizer
-                for group in optimizer.param_groups:
-                    if group["name"] == self.class_prefix+"opacity":
-                        old_params = group["params"][0]
-                        param_state = optimizer.state[old_params]
-                        param_state["exp_avg"] = torch.zeros_like(param_state["exp_avg"])
-                        param_state["exp_avg_sq"] = torch.zeros_like(param_state["exp_avg_sq"])
+                for opt in optimizer:
+                    for group in opt.param_groups:
+                        if group["name"] == self.class_prefix+"opacity":
+                            old_params = group["params"][0]
+                            param_state = opt.state[old_params]
+                            if "exp_avg" in param_state:
+                                param_state["exp_avg"] = torch.zeros_like(param_state["exp_avg"])
+                                param_state["exp_avg_sq"] = torch.zeros_like(param_state["exp_avg_sq"])
             self.xys_grad_norm = None
             self.vis_counts = None
             self.max_2Dsize = None
@@ -393,13 +399,17 @@ class RigidNodes(VanillaGaussians):
             rgbs = torch.clamp(rgbs + 0.5, 0.0, 1.0)
         else:
             rgbs = torch.sigmoid(colors[:, 0, :])
+
+        # get view-dependent uncertainty
+        uncertainty_pdf = self.get_uncertainty(viewdirs)
         
         valid_mask = self.get_pts_valid_mask()
             
         activated_opacities = self.get_opacity * valid_mask.float().unsqueeze(-1)
         activated_scales = self.get_scaling
         activated_rotations = self.quat_act(world_quats)
-        actovated_colors = rgbs
+        actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
+        # actovated_colors = rgbs
         
         # collect gaussians information
         gs_dict = dict(

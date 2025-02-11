@@ -4,7 +4,7 @@ dataset: waymo/3cams
 # ------------- Trainer ------------ #
 trainer:
   type: models.trainers.MultiTrainer
-  ground_method: rsg # [neus, rsg]
+  ground_method: neus # [neus, rsg]
   optim:
     num_iters: 40000
     lidar_pretrain_iters: 0
@@ -26,12 +26,6 @@ trainer:
     mask:
       w: 0.5
       opacity_loss_type: bce # choose from [bce, safe_bce]
-    normal_consistency:
-      w: 0.1
-    distortion:
-      w: 0.1
-    align_error:
-      w: 0.0
     # depth:
     #   w: 0.01 # weight of depth loss
     #   inverse_depth: False # whether to use inverse depth, NOTE that when set to True, must normalize=True
@@ -40,7 +34,6 @@ trainer:
     #   lidar_w_decay: 1.0
     affine:
       w: 0.00001 # weight of affine regularization
-    
   res_schedule:
     double_steps: 250 # training starts at 1/d resolution, every n steps this is doubled
     downscale_times: 2 # at the beginning, resolution is 1/2^d, where d is this number
@@ -62,7 +55,7 @@ trainer:
   gaussian_ctrl_general_cfg:
     warmup_steps: 2000             # warmup steps for alpha
     reset_alpha_interval: 3000    # reset alpha every n steps
-    refine_interval: 300          # refine gaussians every n steps
+    refine_interval: 100          # refine gaussians every n steps
     sh_degree_interval: 1000      # every n intervals turn on another sh degree # TODO adapt
     n_split_samples: 2            # number of samples to split gaussians into
     # may differ in different models
@@ -83,7 +76,7 @@ model:
     type: models.gaussians.VanillaGaussians
     init:
       from_lidar:
-        num_samples: 3000_000
+        num_samples: 1000_000
         return_color: True
       near_randoms: 100_000
       far_randoms: 100_000
@@ -95,34 +88,7 @@ model:
       # sparse_reg:
       #   start_step: 35000
       #   w: 1e-1
-
-# {'type': 'models.gaussians.VanillaGaussians', 'reg': {'sharp_shape_reg': {'w': 1.0, 'step_interval': 10, 'max_gauss_ratio': 10.0}}, 'optim': {'xyz': {'lr': 0.00064, 'lr_final': 1.6e-06, 'scale_factor': 'scene_radius'}, 'sh_dc': {'lr': 0.0025}, 'sh_rest': {'lr': 0.000125}, 'opacity': {'lr': 0.05}, 'scaling': {'lr': 0.005}, 'rotation': {'lr': 0.001}}, 'ctrl': {'warmup_steps': 2000, 'reset_alpha_interval': 3000, 'refine_interval': 300, 'sh_degree_interval': 1000, 'n_split_samples': 2, 'reset_alpha_value': 0.01, 'densify_grad_thresh': 0.0005, 'densify_size_thresh': 0.003, 'cull_alpha_thresh': 0.005, 'cull_scale_thresh': 0.5, 'cull_screen_size': 0.15, 'split_screen_size': 0.05, 'stop_screen_size_at': 14000, 'stop_split_at': 35000, 'sh_degree': 3}}
-  Ground_gs:
-    type: models.gaussians.VanillaGaussians
-    sdf_grad: False
-    query_rgb: True
-    query_quat: True
-    ground_gs: True
-    gaussian_2d: True
-    
-    clip_scale: 0.05
-    reg:
-      sharp_shape_reg:
-        w: 1.
-        step_interval: 10
-        max_gauss_ratio: 5.
-      max_s_square_reg:
-        w: 0.1
-    optim:
-      xyz:
-        lr: 6.4e-04
-        lr_final: 1.6e-06
-        scale_factor: 10.0
-    ctrl:
-      densify_grad_thresh: 0.00005
-      cull_alpha_thresh: 0.005
-      sh_degree: 1
-      reset_alpha_interval: 50000
+        
   RigidNodes:
     type: models.nodes.RigidNodes
     init:
@@ -132,17 +98,17 @@ model:
     ctrl:
       cull_scale_thresh: 0.1
       stop_screen_size_at: 40000
-      stop_split_at: 30000
+      stop_split_at: 40000
       cull_out_of_bound: true
     reg:
       sharp_shape_reg:
         w: 1.
         step_interval: 10
         max_gauss_ratio: 10.
-      temporal_smooth_reg:
-        trans:
-          w: 0.01 # optimal value may vary
-          smooth_range: 5 # no ablation
+      # temporal_smooth_reg:
+      #   trans:
+      #     w: 0.01 # optimal value may vary
+      #     smooth_range: 5 # no ablation
     optim:
       ins_rotation:
         lr: 0.00001
@@ -279,7 +245,7 @@ model:
     pretrain_method: lidar # [egopose, lidar]
     pretrain_iters: 0
     params:
-      batch_size: 32768
+      batch_size: 8192
       resolution: 1024
       losses: 
         l1:
@@ -322,18 +288,18 @@ model:
       all:
         lr: 1.0e-5
         weight_decay: 1.0e-6
-  # CamPose_ts_neus:
-  #   type: models.modules.CameraOptModule_ts
-  #   optim:
-  #     all:
-  #       lr: 1.0e-5
-  #       weight_decay: 1.0e-6
-  # ExtrinsicPose_neus:
-  #   type: models.modules.ExtrinsicOptModule
-  #   optim:
-  #     all:
-  #       lr: 1.0e-5
-  #       weight_decay: 1.0e-6
+  CamPose_ts_neus:
+    type: models.modules.CameraOptModule_ts
+    optim:
+      all:
+        lr: 1.0e-5
+        weight_decay: 1.0e-6
+  ExtrinsicPose_neus:
+    type: models.modules.ExtrinsicOptModule
+    optim:
+      all:
+        lr: 1.0e-5
+        weight_decay: 1.0e-6
 
   # CamPose:
   #   type: models.modules.CameraOptModule
@@ -360,5 +326,5 @@ render:
 logging:
   vis_freq: 2000 # how often to visualize training stats
   print_freq: 500 # how often to print training stats
-  saveckpt_freq: 15000 # how often to save checkpoints
+  saveckpt_freq: 5000 # how often to save checkpoints
   save_seperate_video: True # whether to save seperate videos for each scene

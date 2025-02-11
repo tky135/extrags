@@ -26,7 +26,8 @@ def do_evaluation(
     args: argparse.Namespace = None,
     render_keys: Optional[List[str]] = None,
     post_fix: str = "",
-    log_metrics: bool = True
+    log_metrics: bool = True,
+    shift_x: bool = 3
 ):
     trainer.set_eval()
 
@@ -171,6 +172,7 @@ def do_evaluation(
             compute_error_map=cfg.render.vis_error,
             vis_indices=vis_indices,
             lane_shift=True,
+            shift_x=3,
         )
         
         if log_metrics:
@@ -203,7 +205,7 @@ def main(args):
     log_dir = os.path.dirname(args.resume_from)
     cfg = OmegaConf.load(os.path.join(log_dir, "config.yaml"))
     cfg = OmegaConf.merge(cfg, OmegaConf.from_cli(args.opts))
-    export_neus_2dgs = cfg.trainer.export_neus_2dgs
+    # export_neus_2dgs = cfg.trainer.export_neus_2dgs
     os.environ.update({
         "LOG_DIR": log_dir,
         "DATASET": cfg.dataset,
@@ -242,6 +244,7 @@ def main(args):
     logger.info(
         f"Resuming training from {args.resume_from}, starting at step {trainer.step}"
     )
+    trainer.export_ply(output_path=os.path.join(cfg.log_dir, f"step_eval.ply"))
     
     # if export_neus_2dgs:
     #     print("exporting neus to 2dgs")
@@ -259,7 +262,7 @@ def main(args):
     
     # define render keys
     render_keys = [
-        "gt_rgbs",
+        # "gt_rgbs",
         "rgbs",
         # "Background_rgbs",
         # "RigidNodes_rgbs",

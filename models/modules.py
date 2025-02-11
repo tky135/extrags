@@ -272,11 +272,11 @@ class AffineTransform(nn.Module):
         }
     def load_state_dict(self, state_dict: Dict, **kwargs) -> str:
         # 对于测试数据，取前一个时间和后一个时间的平均值
-        return
+        # return
         embedding_weight = state_dict["embedding.weight"]
-        for i in range(embedding_weight.shape[0]):
-            if torch.norm(embedding_weight[i]) == 0:
-                embedding_weight[i] = (embedding_weight[i - 1] + embedding_weight[i + 1]) / 2
+        # for i in range(embedding_weight.shape[0]):
+        #     if torch.norm(embedding_weight[i]) == 0:
+        #         embedding_weight[i] = (embedding_weight[i - 1] + embedding_weight[i + 1]) / 2
         state_dict["embedding.weight"] = embedding_weight
         return super().load_state_dict(state_dict, **kwargs)
 class CameraOptModule(torch.nn.Module):
@@ -476,7 +476,10 @@ class ExtrinsicOptModule(torch.nn.Module):
         Returns:
             updated camtoworlds: (..., 4, 4)
         """
-        assert camtoworlds.shape[:-2] == embed_ids.shape
+        try:
+            assert camtoworlds.shape[:-2] == embed_ids.shape
+        except:
+            import ipdb ; ipdb.set_trace()
         batch_shape = camtoworlds.shape[:-2]
         pose_deltas = self.embeds(embed_ids)  # (..., 9)
         dx, drot = pose_deltas[..., :3], pose_deltas[..., 3:]
@@ -1034,8 +1037,8 @@ class Ground(nn.Module):
         # road_mask = label_img_gt_raw > 0
         before_affine = image_infos['before_affine'].cpu().numpy() * 255 if 'before_affine' in image_infos else np.zeros_like(gt_img)
         after_affine = image_infos['after_affine'].cpu().numpy() * 255 if 'after_affine' in image_infos else np.zeros_like(gt_img)
-        rsg = image_infos['rsg'].cpu().numpy() * 255 if 'rsg' in image_infos else np.zeros_like(gt_img)
-        depth_normal = image_infos['depth_normal'].permute(1, 2, 0).numpy() if 'depth_normal' in image_infos else np.zeros_like(gt_img)
+        rsg = image_infos['rsg'].cpu().numpy() * 255 if 'rsg' in image_infos else image_infos['uncertainty'].cpu().numpy() * 255
+        depth_normal = image_infos['depth_normal'].permute(1, 2, 0).numpy() if 'depth_normal' in image_infos else image_infos['opacity'].cpu().numpy() * 255
         normal = image_infos['normal'].permute(1, 2, 0).numpy() if 'normal' in image_infos else np.zeros_like(gt_img)
         
         depth_blend = image_infos['depth_blend'] if 'depth_blend' in image_infos else np.zeros_like(gt_img)

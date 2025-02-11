@@ -587,7 +587,7 @@ def main(args):
 
         if step > diff_start and diff_method in ['sds', 'multistep'] and step % diff_freq == 0:
         # if step > diff_start and diff_method == 'sds' and image_infos['is_key_frame'].flatten().item() is True:
-            shift_x = random.choice([3])
+            shift_x = random.choice(shift_x_l)
             random_camera = random.choice([0, 1, 2, 3, 4, 5])
             # random_camera = random.choice([3])
             if diff_method == 'sds':

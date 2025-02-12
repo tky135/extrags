@@ -73,10 +73,7 @@ def quaternion_conjugate(q):
     w, x, y, z = q
     return np.array([w, -x, -y, -z])
 def enhance_edges(x, gamma=2):
-    if x <= 0.5:
-        return 0.5 * (2 * x) ** gamma
-    else:
-        return 1 - 0.5 * (2 * (1 - x)) ** gamma
+    return (0.5 * (2 * x)) ** gamma * (x <= 0.5).float().detach() + (1 - 0.5 * (2 * (1 - x)) ** gamma) * (x > 0.5).float().detach()
 
 def apply_quaternion_rotation(quaternions, points):
     """Applies a quaternion rotation to a set of 3D points."""
@@ -478,8 +475,7 @@ class VanillaGaussians(nn.Module):
                     dim=0,
                 )
                 self.under_ground = torch.cat([self.under_ground, split_under_ground, dep_under_ground], dim=0)
-                import ipdb ; ipdb.set_trace()
-                self.alpha_cum = torch.cat([self.alpha_cum, split_alpha_cum, dup_alpha_cum], dim=0)
+                self.alpha_cum = torch.cat([self.alpha_cum, split_alpha_cum.flatten(), dup_alpha_cum], dim=0)
                 
                 split_idcs = torch.where(splits)[0]
                 param_groups = self.get_gaussian_param_groups()

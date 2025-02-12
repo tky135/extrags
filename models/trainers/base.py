@@ -800,6 +800,9 @@ class BasicTrainer(nn.Module):
             return
         total_loss = sum(loss for loss in loss_dict.values())
         self.grad_scaler.scale(total_loss).backward()
+
+        if self.models['Background']._uncertainty.grad is not None:
+            print("uncertainty mean grad", self.models['Background']._uncertainty.grad.mean())
         self.optimizer_step(is_diffusion_step=is_diffusion_step)
         
         scale = self.grad_scaler.get_scale()

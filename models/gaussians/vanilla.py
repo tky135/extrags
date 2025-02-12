@@ -157,7 +157,7 @@ class VanillaGaussians(nn.Module):
         self.clip_scale = kwargs.get("clip_scale", None)
 
         # uncertainty learning
-        self.uncertainty_degree = 2
+        self.uncertainty_degree = 4
         self.uncertainty_num_coeffs = (self.uncertainty_degree + 1) ** 2
         # self.uncertainty_coeffs = nn.Parameter(torch.randn(self.uncertainty_num_coeffs)).to(self.device)
         self._uncertainty = torch.zeros(1, self.uncertainty_num_coeffs, 1, device=self.device)
@@ -563,6 +563,7 @@ class VanillaGaussians(nn.Module):
         self._uncertainty = Parameter(self._uncertainty[~culls].detach())
         self._opacities = Parameter(self._opacities[~culls].detach())
         self.from_lidar = self.from_lidar[~culls]
+        self.alpha_cum = self.alpha_cum[~culls]
         
         # 不更新self.under_ground, base会更新
 

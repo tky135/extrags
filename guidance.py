@@ -585,8 +585,9 @@ class MagicDrive:
         sds_img_vae = sds_img_vae * self.vae.config.scaling_factor
         sds_img_vae = rearrange(sds_img_vae, "(b n) c h w -> b n c h w", n=N_cam)
 
-        inpainting_mask_vae = F.interpolate(inpainting_mask, size=sds_img_vae.shape[-2:], mode='nearest').unsqueeze(0).half()
+        inpainting_mask_vae = F.interpolate(inpainting_mask, size=sds_img_vae.shape[-2:], mode='bilinear').unsqueeze(0).half()
         inpainting_mask_vae = torch.cat([inpainting_mask_vae, inpainting_mask_vae[:, :, :1, :, :]], dim=2)
+        # self.save_image0_from_pixels(inpainting_mask_vae[:, :, :3, :, :], f"inpainting_mask_vae_{step}.png")
 
 
         # import ipdb ; ipdb.set_trace()

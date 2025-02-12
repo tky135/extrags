@@ -21,7 +21,41 @@ from datasets.driving_dataset import DrivingDataset
 logger = logging.getLogger()
 current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
 shift_x_l = []
-def dilate(image: torch.Tensor, kernel_size: int = 3) -> torch.Tensor:
+
+def create_gaussian_kernel(kernel_size, image_device):
+    """
+    Creates a Gaussian kernel with the specified size.
+
+    Args:
+        kernel_size (int): The size of the kernel (must be odd).
+        image_device (torch.device): The device of the image tensor (to place kernel on same device).
+
+    Returns:
+        torch.Tensor: A Gaussian kernel tensor of shape (1, 1, kernel_size, kernel_size).
+    """
+    if kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be odd to have a center.")
+
+    sigma = 0.3 * ((kernel_size - 1) * 0.5 - 1) + 0.8 # Heuristic for sigma, you can adjust this
+    if sigma < 0.1: # To prevent very small sigma for small kernels
+        sigma = 0.1
+
+    center = kernel_size // 2
+    x, y = torch.meshgrid(torch.arange(0, kernel_size, dtype=torch.float32),
+                           torch.arange(0, kernel_size, dtype=torch.float32), indexing='ij')
+    gaussian_kernel = torch.exp(-((x - center)**2 + (y - center)**2) / (2 * sigma**2))
+
+    # Normalize to make the kernel sum to 1
+    gaussian_kernel = gaussian_kernel / gaussian_kernel.sum()
+    # gaussian_kernel = gaussian_kernel / gaussian_kernel[center, center] * 1.0
+    # import ipdb ; ipdb.set_trace()
+    # Reshape to (1, 1, kernel_size, kernel_size) and set dtype and device
+    gaussian_kernel = gaussian_kernel.reshape(1, 1, kernel_size, kernel_size).to(dtype=torch.float32, device=image_device)
+
+    return gaussian_kernel
+
+
+def dilate(image: torch.Tensor, kernel_size: int = 3, gaussian: bool=False) -> torch.Tensor:
     """
     Dilates a binary 2D image tensor using a square kernel of given size.
     
@@ -36,17 +70,29 @@ def dilate(image: torch.Tensor, kernel_size: int = 3) -> torch.Tensor:
         raise ValueError("Kernel size should be odd for symmetric dilation.")
     
     # Ensure image is float and add batch & channel dimensions
-    img = image.float().unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, H, W]
+    if len(image.shape) == 2:
+        img = image.float().unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, H, W]
+    else:
+        img = image
+    assert len(img.shape) == 4, "Input image should have shape (H, W) or (1, 1, H, W)." 
     
     # Create kernel (structuring element)
     kernel = torch.ones(1, 1, kernel_size, kernel_size, dtype=torch.float32, device=image.device)
+    if gaussian:
+        kernel = create_gaussian_kernel(kernel_size, image.device)
+    
+    kernel = kernel.repeat(img.shape[1], img.shape[1], 1, 1)
+
     
     # Apply convolution with padding to maintain size
     padding = kernel_size // 2
     convolved = torch.nn.functional.conv2d(img, kernel, padding=padding)
     
     # Threshold to get binary values and remove added dimensions
-    dilated = (convolved > 0).float().squeeze().squeeze()
+    if not gaussian:
+        dilated = (convolved > 0).float().squeeze(0).squeeze(0)
+    else:
+        dilated = convolved.float()
     
     return dilated
 
@@ -309,6 +355,7 @@ def main(args):
 
         # update shift set every 2000 steps
         if step > diff_start and step % diff_start == 0 and diff_method == 'direct':
+            raise Exception
         # if diff_method == 'direct':
             # update shift buffer
             dataset.diff_image_set.mode = "sequential"
@@ -672,8 +719,9 @@ def main(args):
                     image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1).detach()
                 
                 # dilate inpainting mask
-                inpainting_mask = (diff_outputs['RigidNodes_opacity'] > 0.1).float().squeeze()
-                inpainting_mask = dilate(inpainting_mask, kernel_size=33)
+                inpainting_mask = diff_outputs['uncertainty']['rgb_gaussians'].float().squeeze()
+                # inpainting_mask = (diff_outputs['RigidNodes_opacity'] > 0.1).float().squeeze()
+                # inpainting_mask = dilate(inpainting_mask, kernel_size=11, gaussian=True)
 
                 inpainting_mask_6_views[diff_cam_infos['cam_name'][0]] = inpainting_mask.unsqueeze(0).detach().repeat(3, 1, 1)
             
@@ -714,8 +762,11 @@ def main(args):
                     image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1).detach()
                 
                 # dilate inpainting mask
-                inpainting_mask = (diff_outputs['RigidNodes_opacity'] > 0.1).float().squeeze()
-                inpainting_mask = dilate(inpainting_mask, kernel_size=33)
+                inpainting_mask = diff_outputs['uncertainty']['rgb_gaussians'].float().squeeze()
+                # inpainting_mask = (diff_outputs['RigidNodes_opacity'] > 0.1).float().squeeze()
+                # inpainting_mask = dilate(inpainting_mask, kernel_size=33)
+                # inpainting_mask = dilate(inpainting_mask, kernel_size=11, gaussian=True)
+
 
                 inpainting_mask_6_views[diff_cam_infos['cam_name'][0]] = inpainting_mask.unsqueeze(0).detach().repeat(3, 1, 1)
 
@@ -725,14 +776,19 @@ def main(args):
             image_6_views_ts = torch.stack(image_6_views_l, dim=0)
             inpainting_mask_6_views_ts = torch.stack(inpainting_mask_6_views_l, dim=0)
             image_6_views_ts = F.interpolate(image_6_views_ts, size=(224, 400), mode='bilinear', align_corners=False)
-            inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(224, 400), mode='nearest')
+            inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(224, 400), mode='bilinear')
+            inpainting_mask_6_views_ts = (1 - inpainting_mask_6_views_ts).clip(0, 1)
+            inpainting_mask_6_views_ts = dilate(inpainting_mask_6_views_ts, kernel_size=11, gaussian=True).clip(0, 1)
             image_6_views_ts = (image_6_views_ts.unsqueeze(0) - 0.5) * 2.0
 
-            rint = random.randint(0, 20)
+            rint = 0
+            # rint = random.randint(0, 20)
             frame_idx = diff_image_infos['frame_idx'].flatten()[0].item()
             if rint == 0:
-                trainer.mgd.save_image0_from_pixels(image_6_views_ts, f'image_views_{frame_idx}_{step}_{random_camera}.png')
-                trainer.mgd.save_image0_from_pixels(inpainting_mask_6_views_ts.unsqueeze(0), f'inpainting_mask_{frame_idx}_{step}_{random_camera}.png')
+                with torch.no_grad():
+                    blended_img = image_6_views_ts * inpainting_mask_6_views_ts.unsqueeze(0) + (1 - inpainting_mask_6_views_ts.unsqueeze(0)) * torch.tensor([-1, 1, -1], device=image_6_views_ts.device).view(1, 1, 3, 1, 1)
+                    trainer.mgd.save_image0_from_pixels(blended_img, f'image_views_{frame_idx}_{step}_{random_camera}.png')
+                    trainer.mgd.save_image0_from_pixels((inpainting_mask_6_views_ts.unsqueeze(0) - 0.5) * 2.0, f'inpainting_mask_{frame_idx}_{step}_{random_camera}.png')
             
 
             inpainting_mask_6_views_ts_ss = inpainting_mask_6_views_ts.reshape(image_6_views_ts.shape)

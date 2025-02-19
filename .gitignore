@@ -20,3 +20,5 @@ __pycache__/
 /inpaint*/
 /experiments/
 /.*/
+/pretrained 
+/third_party

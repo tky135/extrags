@@ -1377,47 +1377,76 @@ if __name__ == "__main__":
     # 556a590f3e1741fb87d7e4dc8ea687e4
 
     method = 'multistep'
-    save_dict = torch.load("save_dict.pt")
-    if method == 'direct':
-        mgd.get_loss(pred_rgb=save_dict['pred_rgb'], sample_token=save_dict['sample_token'], timestep=500, shift_x=3, step=0, method='direct', inpainting_mask=torch.ones_like(save_dict['inpainting_mask']))
-    elif method in ['sds', 'multistep', 'anneal', 'repaint', 'repaint2']:
-        # sds
-        image_params = torch.nn.Parameter(save_dict['pred_rgb'].cuda(), requires_grad=True)
-        optimizer = torch.optim.Adam([image_params], lr=1e-2)
+    pt_path_prefix = "experiments/0050_uncertainty_mask_diffusion"
+    iter_list = [31500, 31900, 30400, 30600, 31600, 32200]
+    scene_idx = [40, 605, 516]
+    pt_prefix = [("save_dict_" + str(i) + "_" + str(j), i, j) for i in scene_idx for j in iter_list]
+    pt_path = find_files_by_prefix(pt_path_prefix, [pt_prefix[i][0] for i in range(len(pt_prefix))])
+    iterable = [(pt_path[i], int(pt_path[i].split("_")[-3]), int(pt_path[i].split("_")[-2])) for i in range(len(pt_path))]
+    for pt_path, scene, it in iterable:
+        print(pt_path, scene, it)
+        save_dict = torch.load(pt_path)
+        if method == 'direct':
+            mgd.get_loss(pred_rgb=save_dict['pred_rgb'], sample_token=save_dict['sample_token'], timestep=500, shift_x=3, step=0, method='direct', inpainting_mask=torch.ones_like(save_dict['inpainting_mask']))
+        elif method in ['sds', 'multistep', 'anneal', 'repaint', 'repaint2']:
+            # sds
+            image_params = torch.nn.Parameter(save_dict['pred_rgb'].cuda(), requires_grad=True)
+            optimizer = torch.optim.Adam([image_params], lr=1e-2)
 
 
-        for i in range(1, 999):
-            image_params_masked = image_params * save_dict['inpainting_mask'].cuda() + save_dict['pred_rgb'].cuda() * (1 - save_dict['inpainting_mask'].cuda())
-            optimizer.zero_grad()
-            # t = sample_gaussian_around_t(50 * (1000 - i) // 1000, sigma=30) + 50
-            # t = (1000 - i)
-            t = random.randint(50, 100)
-            # t = random.randint(1, 999)
-            kwargs = {
-                "resample": 3,
-                "num_ts": 10,
-                "ts": t,
-                "inmask_g_scale": 0, 
-                "cfg_scale": 2.0,
-                "stochastic": False
-            }
-            # kwargs = {
-            #     "resample": 4,
-            #     "num_ts": 5,
-            #     "ts": 300,
-            #     "inmask_g_scale": 0.5,
-            #     "stochastic": False,
-            #     "cfg_scale": 2.0
-            # }
-            loss, ret_dict = mgd.get_loss(pred_rgb=image_params_masked, sample_token=save_dict['sample_token'], timestep=None, shift_x=3, step=i, method=method, inpainting_mask=save_dict['inpainting_mask'], **kwargs)
-            target_latent = ret_dict['target_latent']
-            loss.backward()
+            for i in range(1, 201):
+                image_params_masked = image_params * save_dict['inpainting_mask'].cuda() + save_dict['pred_rgb'].cuda() * (1 - save_dict['inpainting_mask'].cuda())
+                optimizer.zero_grad()
+                # t = sample_gaussian_around_t(50 * (1000 - i) // 1000, sigma=30) + 50
+                # t = (1000 - i)
+                # t = random.randint(50, 100)
+                t = 50
+                # t = random.randint(1, 999)
+                kwargs = {
+                    "resample": 2,
+                    "num_ts": 10,
+                    "ts": t,
+                    "inmask_g_scale": 1, 
+                    "stochastic": False,
+                    "cfg_scale": 2.0,
+                    "scene_idx": 605
+                }
+                # kwargs = {
+                #     "resample": 4,
+                #     "num_ts": 5,
+                #     "ts": 300,
+                #     "inmask_g_scale": 0.5,
+                #     "stochastic": False,
+                #     "cfg_scale": 2.0
+                # }
+                inpainting_mask = dilate(save_dict['inpainting_mask'], 45, True)
+                loss, ret_dict = mgd.get_loss(pred_rgb=image_params_masked, sample_token=save_dict['sample_token'], timestep=None, shift_x=save_dict['shift_x'], step=i, method=method, inpainting_mask=inpainting_mask, **kwargs)
+                target_latent = ret_dict['target_latent']
+                loss.backward()
 
-            optimizer.step()
-            print(f"step {i}, loss {loss.item()} t {t}")
-            # print(f"step {i}, loss {loss.item()}, image_consis_loss {image_consis_loss.item()} t {t}")
-            # if i % 50 == 0:
-                # self.save_image0_from_latents(sds_img_vae, f"sds_img_vae_{i}.png")
-            mgd.save_image0_from_pixels(image_params.clip(-1, 1), f"sds_img_{i}.png")
-            mgd.save_image0_from_latents(target_latent, f"sds_img_remove_noise_target_{i}_{200}.png")
-                # mgd.save_image0_from_latents(ret_dict['sds_img_vae'], f"sds_img_vae_{i}.png")
+                optimizer.step()
+                # print(f"step {i}, loss {loss.item()}, image_consis_loss {image_consis_loss.item()} t {t}")
+                # if i % 50 == 0:
+                    # self.save_image0_from_latents(sds_img_vae, f"sds_img_vae_{i}.png")
+
+                mgd.save_image0_from_pixels(image_params.clip(-1, 1), f"{scene}_{it}_input.png")
+                mgd.save_image0_from_latents(target_latent, f"{scene}_{it}_target.png")
+                mgd.save_image0_from_pixels(inpainting_mask.unsqueeze(0) * 2 - 1, f"{scene}_{it}_mask.png")
+                    # mgd.save_image0_from_latents(ret_dict['sds_img_vae'], f"sds_img_vae_{i}.png")
+                break
+
+
+
+                # evaluation of target image
+
+                # with torch.no_grad():
+                #     target_image = ret_dict['unnorm_target_image'] * (1 - save_dict['inpainting_mask'].cuda())
+                #     input_image = image_params_masked * (1 - save_dict['inpainting_mask'].cuda())
+                #     consistency = F.l1_loss(target_image, input_image)
+                #     print(f"consistency loss: {consistency.item() * 10000}")
+                #     sds_scores = []
+                #     for t in [50, 100, 200, 500]:
+                #         sds_loss, _ = mgd.get_loss(pred_rgb=target_image, sample_token=save_dict['sample_token'], timestep=t, shift_x=3, step=i, method='sds', inpainting_mask=save_dict['inpainting_mask'])
+                #         sds_scores.append(sds_loss.item())
+                #     print(f"sds scores: {sds_scores}")
+            

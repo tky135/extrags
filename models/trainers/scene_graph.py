@@ -457,6 +457,7 @@ class MultiTrainer(BasicTrainer):
         # 先渲染路面部分
         if 'Ground' in self.models.keys():
             # render ground
+            image_infos['is_train'] = False
             ground_model = self.models['Ground']
             rgb_ground = ground_model(image_infos, camera_infos)
             outputs['ground'] = rgb_ground
@@ -466,6 +467,7 @@ class MultiTrainer(BasicTrainer):
                 outputs['ground']['color_fine'] = self.affine_transformation(
                     outputs['ground']['color_fine'], image_infos, camera_infos
                 )
+            image_infos['is_train'] = self.training
         
         if 'Ground_gs' in self.models.keys() and self.ground_method == 'rsg':
             gs_ground, align_error = self.collect_gaussians(
@@ -523,7 +525,8 @@ class MultiTrainer(BasicTrainer):
         # 渲染3dgs
         gs = self.collect_gaussians(
             cam=processed_cam,
-            image_ids=None
+            image_ids=None,
+            is_diffusion_step=is_diffusion_step
         ) 
         
         outputs_3dgs, render_fn = self.render_gaussians(
@@ -636,7 +639,7 @@ class MultiTrainer(BasicTrainer):
                 outputs["Dynamic_opacity"] = sep_opacity
                 outputs["Dynamic_depth"] = sep_depth
         # if ((self.step % 100 == 1) and self.training):# or is_diffusion_step:
-        if ((self.step % 100 == 1) and self.training) or is_diffusion_step:
+        if ((self.step % 100 == 1) and self.training) or (is_diffusion_step and self.step % 100 == 0):
             with torch.no_grad():
                 write_rgb = outputs['rgb'].detach().cpu() * 255
                 

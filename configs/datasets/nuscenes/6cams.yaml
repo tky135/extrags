@@ -10,7 +10,7 @@
 trainer:
   n_camera: 6
 data:
-  data_root: /train-syncdata/kaiyuan.tan/extrags_data/nuscenes/processed_10Hz_2/trainval # data root for the dataset
+  data_root: /train-syncdata/kaiyuan.tan/extrags_data/nuscenes/processed_10Hz/trainval # data root for the dataset
   dataset: nuscenes # dataset type
   scene_idx: 0 # which scene to use, [0, 849] for nuscenes's train/val sets, inclusive
   start_timestep: 0 # which timestep to start from

@@ -46,7 +46,7 @@ class DeformableNodes(RigidNodes):
         delta_xyz, delta_quat, delta_scale = self.deform_network(x, t, nonrigid_embed)
         return delta_xyz, delta_quat, delta_scale
     
-    def get_gaussians(self, cam: dataclass_camera, is_uncertainty: bool = False) -> Dict[str, torch.Tensor]:
+    def get_gaussians(self, cam: dataclass_camera, is_uncertainty: bool = False, is_diffusion_step: bool = False) -> Dict[str, torch.Tensor]:
         filter_mask = torch.ones_like(self._means[:, 0], dtype=torch.bool)
         self.filter_mask = filter_mask
         
@@ -91,7 +91,7 @@ class DeformableNodes(RigidNodes):
         activated_opacities = self.get_opacity * valid_mask.float().unsqueeze(-1)
         activated_rotations = self.quat_act(world_quats)
         if is_uncertainty:
-            actovated_colors = self.get_uncertainty(viewdirs).unsqueeze(-1)
+            actovated_colors = self.get_uncertainty(viewdirs, py=False).unsqueeze(-1)
         else:
             actovated_colors = rgbs
         # actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
@@ -105,6 +105,17 @@ class DeformableNodes(RigidNodes):
                 _rgbs=actovated_colors[filter_mask],
                 _scales=activated_scales[filter_mask].detach(),
                 _quats=activated_rotations[filter_mask].detach(),
+            )
+        elif is_diffusion_step and not is_uncertainty:
+            with torch.no_grad():
+                uncertainty_pdf = self.get_uncertainty(viewdirs, py=True).unsqueeze(-1).clip(0, 1)
+                filtered_uncert_mask = uncertainty_pdf[filter_mask]
+            gs_dict = dict(
+                _means=world_means[filter_mask] * filtered_uncert_mask + world_means[filter_mask].detach() * (1 - filtered_uncert_mask),
+                _opacities=activated_opacities[filter_mask] * filtered_uncert_mask + activated_opacities[filter_mask].detach() * (1 - filtered_uncert_mask),
+                _rgbs=actovated_colors[filter_mask] * filtered_uncert_mask + actovated_colors[filter_mask].detach() * (1 - filtered_uncert_mask),
+                _scales=activated_scales[filter_mask] * filtered_uncert_mask + activated_scales[filter_mask].detach() * (1 - filtered_uncert_mask),
+                _quats=activated_rotations[filter_mask] * filtered_uncert_mask + activated_rotations[filter_mask].detach() * (1 - filtered_uncert_mask)
             )
         else:
             gs_dict = dict(

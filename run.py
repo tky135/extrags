@@ -7,7 +7,7 @@ import shutil
 
 
 # tmp script
-TMP_SCRIPT = "nusc_run_continue.sh"
+TMP_SCRIPT = "nusc_run_continue_new.sh"
 PRIORITY = "LOW"
 # thread-safe counter
 class GlobalCounter:
@@ -44,18 +44,10 @@ try:
 except:
     compare_with=None
 
-try:
-    note=sys.argv[3]
-except:
-    note=None
 exp_dir = f"experiments/{counter.increment():04d}_{exp_name}"
 if compare_with is not None:
     exp_dir += f"_vs_{compare_with:04d}"
 os.makedirs(exp_dir)
-
-if note is not None:
-    with open(f"{exp_dir}/.note.txt", "w") as f:
-        f.write(note)
 
 # copy code
 cpr_l = ["configs", "datasets", "magicdrive", "models", "tools", "utils"]
@@ -70,5 +62,6 @@ for ln in ln_l:
     os.symlink(f"../../{ln}", f"{exp_dir}/{ln}")
 
 # tmp submit job
-command = f"/home/kaiyuan.tan/tmp submit job --group=ddld --machine_type=4090 --node=1 --gpu=1 --cpu=25 --memory=100 --docker_image artifactory.momenta.works/docker-momenta/hdmap-algorithm/worker-cvg:v0.0.9 --priority={PRIORITY} --work_dir={os.path.abspath(exp_dir)} --command='bash {TMP_SCRIPT} {exp_name}'"
-os.system(command)
+for scene_idx in [605, 40, 516]:
+    command = f"/home/kaiyuan.tan/tmp submit job --group=ddld --machine_type=4090 --node=1 --gpu=1 --cpu=25 --memory=100 --docker_image artifactory.momenta.works/docker-momenta/hdmap-algorithm/worker-cvg:v0.0.9 --priority={PRIORITY} --work_dir={os.path.abspath(exp_dir)} --command='bash {TMP_SCRIPT} {exp_name} {scene_idx}'"
+    os.system(command)

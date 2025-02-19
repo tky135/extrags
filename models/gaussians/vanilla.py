@@ -165,7 +165,7 @@ class VanillaGaussians(nn.Module):
         self.alpha_cum = None
         self.alpha_cnt = 0
 
-    def get_uncertainty(self, directions):
+    def get_uncertainty(self, directions, py=False):
         directions = F.normalize(directions, p=2, dim=-1)
 
         normalized_coeffs = self._uncertainty / torch.norm(self._uncertainty, dim=(1, 2), keepdim=True).detach()
@@ -176,10 +176,12 @@ class VanillaGaussians(nn.Module):
         # norm = torch.sum(self._uncertainty ** 2, dim=(1, 2))
         # pdf = pdf_unnorm / (norm + 1e-10)
         if self.alpha_cum is not None:
-            pdf = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 30
-            print(f"{self.class_prefix}, alpha_cum: {self.alpha_cum.mean()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}")
+            pdf = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 9
+            # pdf = 1 - torch.exp(-pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 25)
+            print(f"{self.class_prefix}, alpha_cum: {self.alpha_cum.mean()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}, max: {pdf.max()}, min: {pdf.min()}, std: {pdf.std()}")
         else:
             pdf = pdf_unnorm
+            print(f"{self.class_prefix}, pdf: {pdf.mean()}, pdf_max: {pdf.max()}, pdf_min: {pdf.min()}, pdf_std: {pdf.std()}")
         return pdf
     
     @property
@@ -368,7 +370,7 @@ class VanillaGaussians(nn.Module):
                 self.alpha_cum = torch.zeros(self.num_points, device=grads.device, dtype=grads.dtype)
                 self.alpha_cnt = 0 
                 
-            self.alpha_cum[full_mask] += alphas[full_mask]
+            self.alpha_cum[full_mask] += torch.ones_like(alphas)[full_mask]
             self.alpha_cnt += 1
 
 
@@ -510,7 +512,7 @@ class VanillaGaussians(nn.Module):
                     # we align to original repo of gaussians spalting
                 reset_value = torch.min(self.get_opacity.data,
                                         torch.ones_like(self._opacities.data) * 0.01)
-                # self._opacities.data = torch.logit(reset_value)
+                self._opacities.data = torch.logit(reset_value)
                 # reset the exp of optimizer
                 for opt in optimizer:
                     for group in opt.param_groups:
@@ -768,7 +770,7 @@ class VanillaGaussians(nn.Module):
         result = F.normalize(rotated_vector, p=2, dim=-1)
         
         return result
-    def get_gaussians(self, cam: dataclass_camera, is_uncertainty:bool=False) -> Dict:
+    def get_gaussians(self, cam: dataclass_camera, is_uncertainty:bool=False, is_diffusion_step:bool = False) -> Dict:
         filter_mask = torch.ones_like(self._means[:, 0], dtype=torch.bool)
         self.filter_mask = filter_mask
         # collect gaussians information
@@ -797,13 +799,13 @@ class VanillaGaussians(nn.Module):
         
         # get view-dependent uncertainty
         if is_uncertainty:
-            uncertainty_pdf = self.get_uncertainty(viewdirs)
+            uncertainty_pdf = self.get_uncertainty(viewdirs, py=False)
             actovated_colors = uncertainty_pdf.unsqueeze(-1)
         else:
             actovated_colors = rgbs
 
         # if True:
-        #     n_samples = 1_000_0000
+        #     n_samples = self.num_points
         #     # Generate random directions on the sphere
         #     directions = torch.randn(n_samples, 3).cuda()
         #     directions = F.normalize(directions, p=2, dim=-1)
@@ -815,6 +817,7 @@ class VanillaGaussians(nn.Module):
         #     # Monte Carlo integration: (4π * average(pdf))
         #     integral = (4 * torch.pi) * (pdf.sum() / n_samples)
         #     print("Integral of the PDF:", integral)
+        # import ipdb ; ipdb.set_trace()
         
         
 
@@ -885,6 +888,19 @@ class VanillaGaussians(nn.Module):
                     _rgbs=actovated_colors[filter_mask],
                     _scales=activated_scales[filter_mask].detach(),
                     _quats=activated_rotations[filter_mask].detach(),
+                )
+            elif is_diffusion_step and not is_uncertainty:
+                raise Exception
+                with torch.no_grad():
+                    uncertainty_pdf = self.get_uncertainty(viewdirs, py=True).unsqueeze(-1).clip(0, 1)
+                    filtered_uncert_mask = uncertainty_pdf[filter_mask]
+                
+                gs_dict = dict(
+                    _means=output_means[filter_mask] * filtered_uncert_mask + output_means[filter_mask].detach() * (1 - filtered_uncert_mask),
+                    _opacities=activated_opacities[filter_mask] * filtered_uncert_mask + activated_opacities[filter_mask].detach() * (1 - filtered_uncert_mask),
+                    _rgbs=actovated_colors[filter_mask] * filtered_uncert_mask + actovated_colors[filter_mask].detach() * (1 - filtered_uncert_mask),
+                    _scales=activated_scales[filter_mask] * filtered_uncert_mask + activated_scales[filter_mask].detach() * (1 - filtered_uncert_mask),
+                    _quats=activated_rotations[filter_mask] * filtered_uncert_mask + activated_rotations[filter_mask].detach() * (1 - filtered_uncert_mask),
                 )
             else:
                 gs_dict = dict(
@@ -978,6 +994,10 @@ class VanillaGaussians(nn.Module):
         self._quats = Parameter(torch.zeros((N,) + self._quats.shape[1:], device=self.device))
         self._features_dc = Parameter(torch.zeros((N,) + self._features_dc.shape[1:], device=self.device))
         self._features_rest = Parameter(torch.zeros((N,) + self._features_rest.shape[1:], device=self.device))
+        if state_dict['_features_rest'].shape[1] > self._features_rest.shape[1]:
+            state_dict['_features_rest'] = state_dict['_features_rest'][:, :self._features_rest.shape[1]]
+        else:
+            assert state_dict['_features_rest'].shape[1] == self._features_rest.shape[1]
         self._uncertainty = Parameter(torch.randn((N,) + self._uncertainty.shape[1:], device=self.device))
         self._opacities = Parameter(torch.zeros((N,) + self._opacities.shape[1:], device=self.device))
         self.from_lidar = torch.zeros(N, device=self.device)

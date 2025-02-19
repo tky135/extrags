@@ -172,7 +172,7 @@ def do_evaluation(
             compute_error_map=cfg.render.vis_error,
             vis_indices=vis_indices,
             lane_shift=True,
-            shift_x=3,
+            shift_x=shift_x,
         )
         
         if log_metrics:

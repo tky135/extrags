@@ -351,6 +351,19 @@ def main(args):
     if diff_method in ['sds', 'multistep']:
         dataset.diff_image_set.mode = "sequential_infinite"
         diffiter = dataset.diff_image_set.get_iterator(num_workers=4, prefetch_factor=2)
+
+
+    # do a evaluation first
+    # do_evaluation(
+    #     step=30000,
+    #     cfg=cfg,
+    #     trainer=trainer,
+    #     dataset=dataset,
+    #     render_keys=['rgbs', 'gt_rgbs', 'lidar_on_images'],
+    #     args=args,
+    #     shift_x=max(shift_x_l)
+    # )
+
     for step in metric_logger.log_every(all_iters, cfg.logging.print_freq):
 
         # update shift set every 2000 steps
@@ -515,6 +528,7 @@ def main(args):
 
             if step > diff_start and diff_method == 'direct' and image_infos['is_key_frame'].flatten().item() is True and image_infos['sample_tokens'][0] in buffer_shift:
                 # diffusion loss
+                raise Exception
                 cam_name = cam_infos['cam_name'][0]
                 target_img = buffer_shift[image_infos['sample_tokens'][0]][0][cam_name2mgd_order[cam_name]]
                 target_img = target_img.cuda()
@@ -634,7 +648,7 @@ def main(args):
 
         if step > diff_start and diff_method in ['sds', 'multistep'] and step % diff_freq == 0:
         # if step > diff_start and diff_method == 'sds' and image_infos['is_key_frame'].flatten().item() is True:
-            shift_x = random.choice([3])
+            shift_x = random.choice(shift_x_l)
             random_camera = random.choice([0, 1, 2, 3, 4, 5])
             # random_camera = random.choice([3])
             if diff_method == 'sds':
@@ -644,7 +658,7 @@ def main(args):
             elif diff_method == 'multistep':
                 lower_bound = 50
                 upper_bound = 100
-                diff_loss_weight = 1.0
+                diff_loss_weight = 1e-4
             
 
 
@@ -671,7 +685,7 @@ def main(args):
             #     diff_loss_weight = 1e-5
 
             timestep = random.randint(lower_bound, upper_bound)
-            # timestep = sample_gaussian_around_t(int((50000. - step) / 20000. * 250), sigma=30)
+            # timestep = sample_gaussian_around_t(int((40000. - step) / 10000. * 275 + 25), sigma=30)
             image_6_views = {}
             inpainting_mask_6_views = {}
             current_sample_token = None
@@ -778,16 +792,17 @@ def main(args):
             image_6_views_ts = F.interpolate(image_6_views_ts, size=(224, 400), mode='bilinear', align_corners=False)
             inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(224, 400), mode='bilinear')
             inpainting_mask_6_views_ts = (1 - inpainting_mask_6_views_ts).clip(0, 1)
-            inpainting_mask_6_views_ts = dilate(inpainting_mask_6_views_ts, kernel_size=11, gaussian=True).clip(0, 1)
+            inpainting_mask_6_views_ts = dilate(inpainting_mask_6_views_ts, kernel_size=45, gaussian=True).clip(0, 1)
             image_6_views_ts = (image_6_views_ts.unsqueeze(0) - 0.5) * 2.0
 
-            rint = 0
-            # rint = random.randint(0, 20)
+            # rint = 0
+            rint = random.randint(0, 5)
             frame_idx = diff_image_infos['frame_idx'].flatten()[0].item()
             if rint == 0:
                 with torch.no_grad():
                     blended_img = image_6_views_ts * inpainting_mask_6_views_ts.unsqueeze(0) + (1 - inpainting_mask_6_views_ts.unsqueeze(0)) * torch.tensor([-1, 1, -1], device=image_6_views_ts.device).view(1, 1, 3, 1, 1)
-                    trainer.mgd.save_image0_from_pixels(blended_img, f'image_views_{frame_idx}_{step}_{random_camera}.png')
+                    trainer.mgd.save_image0_from_pixels(blended_img, f'blended_{frame_idx}_{step}_{random_camera}.png')
+                    trainer.mgd.save_image0_from_pixels(image_6_views_ts, f'image_views_{frame_idx}_{step}_{random_camera}.png')
                     trainer.mgd.save_image0_from_pixels((inpainting_mask_6_views_ts.unsqueeze(0) - 0.5) * 2.0, f'inpainting_mask_{frame_idx}_{step}_{random_camera}.png')
             
 
@@ -795,15 +810,16 @@ def main(args):
             image_6_views_ts = image_6_views_ts * inpainting_mask_6_views_ts_ss + (1 - inpainting_mask_6_views_ts_ss) * image_6_views_ts.detach()
 
             kwargs = {
-                "resample": 1,
+                "resample": 2,
                 "num_ts": 10,
                 "ts": timestep,
-                "inmask_g_scale": 0,
+                "inmask_g_scale": 2.0,
                 "stochastic": False,
-                "cfg_scale": 2.0
+                "cfg_scale": 2.0,
+                "scene_idx": trainer.scene_idx
             }
 
-            loss, retdict = trainer.mgd.get_loss(image_6_views_ts, current_sample_token, None, shift_x=shift_x, step=step, method=diff_method, inpainting_mask=inpainting_mask_6_views_ts, **kwargs)
+            loss, retdict = trainer.mgd.get_loss(image_6_views_ts, current_sample_token, None, shift_x=shift_x, step=step, method=diff_method, inpainting_mask=(inpainting_mask_6_views_ts > 0).float(), **kwargs)
 
             loss *= diff_loss_weight
 

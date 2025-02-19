@@ -1472,6 +1472,8 @@ class Ground(nn.Module):
         
         return rgb
         """
+        if 'gt_rgb' not in render_out:
+            return {}
         true_rgb = render_out['gt_rgb']
         B, _ = true_rgb.shape
         

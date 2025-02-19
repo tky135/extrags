@@ -37,7 +37,7 @@ from mmcv.parallel.data_container import DataContainer
 import datetime
 import random
 prefix_current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-prefix_current_time = prefix_current_time + f"_{os.environ['exp_name']}"
+prefix_current_time = prefix_current_time + f"_{os.environ['exp_name']}" + f"_{os.environ['scene_idx']}"
 if not os.path.exists(prefix_current_time):
     os.makedirs(prefix_current_time)
 
@@ -60,8 +60,9 @@ NameMapping = {
 
 import lpips
 import torch.nn as nn
-
 def normalize_image(image:torch.Tensor):
+    return normalize_image_v1(image)
+def normalize_image_v1(image:torch.Tensor):
     """
     image with shape [b, 6, 3, 224, 400]
     """
@@ -77,6 +78,9 @@ def normalize_image_v2(image:torch.Tensor):
     mean = image.mean(dim=[0, 3, 4], keepdim=True)
     std = image.std(dim=[0, 3, 4], keepdim=True)
     image = (image - mean) / std
+    return image
+
+def normalize_image_v0(image:torch.Tensor):
     return image
 
 
@@ -139,6 +143,79 @@ def quaternion_to_rotation_matrix(quaternion):
     ], dtype=float)
 
     return R
+
+def dilate(image: torch.Tensor, kernel_size: int = 3, gaussian: bool=False) -> torch.Tensor:
+    """
+    Dilates a binary 2D image tensor using a square kernel of given size.
+    
+    Args:
+        image: 2D tensor of shape (H, W) with values 0 and 1.
+        kernel_size: Size of the square kernel (must be odd).
+    
+    Returns:
+        Dilated 2D tensor with same shape as input.
+    """
+    if kernel_size % 2 == 0:
+        raise ValueError("Kernel size should be odd for symmetric dilation.")
+    
+    # Ensure image is float and add batch & channel dimensions
+    if len(image.shape) == 2:
+        img = image.float().unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, H, W]
+    else:
+        img = image
+    assert len(img.shape) == 4, "Input image should have shape (H, W) or (1, 1, H, W)." 
+    
+    # Create kernel (structuring element)
+    kernel = torch.ones(1, 1, kernel_size, kernel_size, dtype=torch.float32, device=image.device)
+    if gaussian:
+        kernel = create_gaussian_kernel(kernel_size, image.device)
+    
+    kernel = kernel.repeat(img.shape[1], img.shape[1], 1, 1)
+
+    
+    # Apply convolution with padding to maintain size
+    padding = kernel_size // 2
+    convolved = torch.nn.functional.conv2d(img, kernel, padding=padding)
+    
+    # Threshold to get binary values and remove added dimensions
+    if not gaussian:
+        dilated = (convolved > 0).float().squeeze(0).squeeze(0)
+    else:
+        dilated = convolved.float()
+    
+    return dilated
+
+def create_gaussian_kernel(kernel_size, image_device):
+    """
+    Creates a Gaussian kernel with the specified size.
+
+    Args:
+        kernel_size (int): The size of the kernel (must be odd).
+        image_device (torch.device): The device of the image tensor (to place kernel on same device).
+
+    Returns:
+        torch.Tensor: A Gaussian kernel tensor of shape (1, 1, kernel_size, kernel_size).
+    """
+    if kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be odd to have a center.")
+
+    sigma = 0.3 * ((kernel_size - 1) * 0.5 - 1) + 0.8 # Heuristic for sigma, you can adjust this
+    if sigma < 0.1: # To prevent very small sigma for small kernels
+        sigma = 0.1
+
+    center = kernel_size // 2
+    x, y = torch.meshgrid(torch.arange(0, kernel_size, dtype=torch.float32),
+                           torch.arange(0, kernel_size, dtype=torch.float32), indexing='ij')
+    gaussian_kernel = torch.exp(-((x - center)**2 + (y - center)**2) / (2 * sigma**2))
+
+    # Normalize to make the kernel sum to 1
+    gaussian_kernel = gaussian_kernel / gaussian_kernel.sum()
+    # gaussian_kernel = gaussian_kernel / gaussian_kernel[center, center] * 1.0
+    # import ipdb ; ipdb.set_trace()
+    # Reshape to (1, 1, kernel_size, kernel_size) and set dtype and device
+    gaussian_kernel = gaussian_kernel.reshape(1, 1, kernel_size, kernel_size).to(dtype=torch.float32, device=image_device)
+
+    return gaussian_kernel
 
 def visualize_class_map(pred_map, save_path="segmentation.png"):
     """
@@ -534,9 +611,9 @@ class MagicDrive:
         """
         pred_rgb: [1, 6, 3, 224, 400]
         """
-        if not os.path.exists(f"save_dict_03_{sample_token}.pt"):
+        if step % 100 == 0:
             save_dict = {'pred_rgb': pred_rgb, 'sample_token': sample_token, 'timestep': timestep, 'shift_x': shift_x, 'step': step, 'method': method, 'inpainting_mask': inpainting_mask}
-            torch.save(save_dict, f"save_dict_03_{sample_token}.pt")
+            torch.save(save_dict, f"save_dict_{kwargs['scene_idx']}_{step}_{sample_token}.pt")
         
         # get sample info
         info = self.get_info(sample_token, shift_x)
@@ -662,15 +739,15 @@ class MagicDrive:
 
             # make sure the image is consistent with the decoder output
             # image consistency loss with sds_img_vae
-            with torch.no_grad():
-                target_latent_detached = sds_img_vae.detach()
-                bs = len(target_latent_detached)
-                target_latent_detached = 1 / self.vae.config.scaling_factor * target_latent_detached
-                target_latent_detached = rearrange(target_latent_detached, 'b c ... -> (b c) ...')
-                target_img = self.vae.decode(target_latent_detached).sample
-                target_img = rearrange(target_img, '(b c) ... -> b c ...', b=bs)
-            image_consis_loss = F.mse_loss(target_img.detach(), image_x.half(), reduction='mean') * 2e4
-            loss += image_consis_loss
+            # with torch.no_grad():
+            #     target_latent_detached = sds_img_vae.detach()
+            #     bs = len(target_latent_detached)
+            #     target_latent_detached = 1 / self.vae.config.scaling_factor * target_latent_detached
+            #     target_latent_detached = rearrange(target_latent_detached, 'b c ... -> (b c) ...')
+            #     target_img = self.vae.decode(target_latent_detached).sample
+            #     target_img = rearrange(target_img, '(b c) ... -> b c ...', b=bs)
+            # image_consis_loss = F.mse_loss(target_img.detach(), image_x.half(), reduction='mean') * 2e4
+            # loss += image_consis_loss
 
 
 
@@ -685,7 +762,7 @@ class MagicDrive:
             # image_consis_loss = F.mse_loss(target_img.detach(), image_x.half(), reduction='mean') * 2e4
             # loss += image_consis_loss
 
-            print("step: {}, loss: {}, image_consis_loss: {}, timestep: {}".format(step, loss, image_consis_loss, timestep))
+            # print("step: {}, loss: {}, image_consis_loss: {}, timestep: {}".format(step, loss, image_consis_loss, timestep))
             
             return loss, {'target_latent': target_latent.detach(), 'sds_img_vae': sds_img_vae.detach()}
         elif method == 'direct':
@@ -936,7 +1013,7 @@ class MagicDrive:
             image = rearrange(image, '(b c) ... -> b c ...', b=bs)
             # image = (image / 2 + 0.5).clamp(0, 1)
 
-
+            unnorm_img = image.detach().clone()
             image = normalize_image(image.float())
             batch['pixel_values'] = normalize_image(batch['pixel_values'])
 
@@ -945,12 +1022,19 @@ class MagicDrive:
 
             loss_l1 = F.l1_loss(batch['pixel_values'], image.float(), reduction='mean')
 
-            # loss_latent_mse = F.mse_loss(sds_img_vae, noisy_latents_sds.detach(), reduction='sum')
+            loss_latent_mse = F.mse_loss(sds_img_vae, noisy_latents_sds.detach(), reduction='sum')
 
             loss_lpips = self.lpips_loss(batch['pixel_values'].float().squeeze(0), image.float().squeeze(0)).mean()
+
+
+            w_latent_mse = 0.0
+            w_l1 = 5.0
+            w_mse = 0.0
+            w_lpips = 50.0
+
             # wt = 1.0 - self.noise_scheduler.alphas_cumprod[timestep].item()
-            total_loss = loss_l1 + 0.1 * loss_lpips
-            return total_loss, {'target_image': image.detach(), 'target_latent': noisy_latents_sds.detach()}
+            total_loss = loss_latent_mse * 0.1 * w_latent_mse + loss_l1 * 1e4 * w_l1 + loss_mse * 2e4 * w_mse + loss_lpips * 1e3 * w_lpips
+            return total_loss, {'unnorm_target_image': unnorm_img, 'target_image': image.detach(), 'target_latent': noisy_latents_sds.detach()}
 
 
         else:
@@ -1222,7 +1306,28 @@ class MagicDrive:
         return info
 
 
-
+def find_files_by_prefix(directory, prefixes):
+    """
+    Find files in a directory that start with any of the specified numeric prefixes
+    
+    Args:
+        directory (str): Path to search in
+        prefixes (list): List of integer prefixes to match
+    
+    Returns:
+        list: Full paths of matching files
+    """
+    str_prefixes = [str(p) for p in prefixes]
+    matches = []
+    
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.is_file():
+                filename = entry.name
+                if any(filename.startswith(prefix) for prefix in str_prefixes):
+                    matches.append(entry.path)
+    
+    return matches
 def argument_search():
     import time
     resample_l = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15]

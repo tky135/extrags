@@ -51,12 +51,14 @@ class SHDistribution(nn.Module):
         # Ensure input directions are unit vectors
         directions = F.normalize(directions, p=2, dim=-1)
 
-        coeffs = self.coeffs.unsqueeze(0).repeat(directions.size(0), 1)
+        coeffs = torch.cat([torch.ones(1, device=self.coeffs.device) / torch.sqrt(torch.tensor(4 * np.pi)).to(self.coeffs.device), self.coeffs[1:]])
+        coeffs = coeffs.unsqueeze(0).repeat(directions.size(0), 1)
 
-
+        
         # adapt for gsplat version
         # coeffs = coeffs.reshape(directions.shape[0], self.num_coeffs, 3)
         coeffs = coeffs.unsqueeze(-1).repeat(1, 1, 3)
+        
         
         # # Compute SH basis values for the directions
         # sh_basis = compute_real_sh(self.degree, directions)  # (batch_size, num_coeffs)
@@ -68,11 +70,11 @@ class SHDistribution(nn.Module):
         f2 = spherical_harmonics(self.degree, directions.cuda(), coeffs.cuda())[:, 0]
         
         # Compute squared value and normalize
-        pdf_unnorm = f2**2
-        norm = torch.sum(self.coeffs**2)  # Integral of f^2 over the sphere
-        pdf = pdf_unnorm / (norm + 1e-10)  # Avoid division by zero
+        # pdf_unnorm = f2**2
+        # norm = torch.sum(self.coeffs**2)  # Integral of f^2 over the sphere
+        # pdf = pdf_unnorm / (norm + 1e-10)  # Avoid division by zero
         
-        return pdf
+        return f2
 
 
 # Initialize model (degree=2 uses 9 coefficients)

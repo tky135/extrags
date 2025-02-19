@@ -197,8 +197,10 @@ class BasicTrainer(nn.Module):
             component_name = params_name.split("#")[1]
             # if component_name in ['sh_rest', 'ins_rotation', 'ins_translation']:
             #     continue
-            if component_name != "uncertainty" and class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus', 'DeformableNodes', 'Background', 'Sky']:
+            if component_name != "uncertainty" and class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus']:
+            # if component_name != "uncertainty" and class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus', 'DeformableNodes', 'Background', 'Sky']:
                 continue
+            
             class_cfg = self.model_config.get(class_name)
             class_optim_cfg = class_cfg["optim"]
             
@@ -537,7 +539,8 @@ class BasicTrainer(nn.Module):
         cam: dataclass_camera,
         image_ids: torch.Tensor, # leave it here for future use
         is_ground: bool = False,
-        is_uncertainty: bool = False
+        is_uncertainty: bool = False,
+        is_diffusion_step: bool = False
     ) -> dataclass_gs:
         gs_dict = {
             "_means": [],
@@ -554,7 +557,7 @@ class BasicTrainer(nn.Module):
                 continue
             if not is_ground and class_name in ["Ground_gs"]:
                 continue
-            gs = self.models[class_name].get_gaussians(cam, is_uncertainty)
+            gs = self.models[class_name].get_gaussians(cam, is_uncertainty, is_diffusion_step=False)
             if gs is None:
                 continue
     
@@ -1001,7 +1004,7 @@ class BasicTrainer(nn.Module):
                 })
 
         # update uncertainty
-        # uncertainty_loss = torch.nn.functional.mse_loss(outputs['uncertainty']['rgb_gaussians'].clip(0, 1), outputs['uncertainty']['opacity'].detach(), reduction='mean')
+        # uncertainty_loss = torch.nn.functional.mse_loss(outputs['uncertainty']['rgb_gaussians'].clip(0, 1), outputs['uncertainty']['opacity'].detach(), reduction='mean') * 1e5
         uncertainty_loss = - outputs['uncertainty']['rgb_gaussians'].log().mean()
         loss_dict.update({
             "uncertainty_loss": uncertainty_loss * 1e5

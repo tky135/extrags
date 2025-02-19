@@ -4,7 +4,7 @@
 __pycache__/
 /wandb/
 /*.sh
-/output/
+/output*/
 /.output_results/
 /*.png
 /third_party/
@@ -19,3 +19,4 @@ __pycache__/
 .vscode/
 /inpaint*/
 /experiments/
+/.*/

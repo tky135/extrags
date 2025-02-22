@@ -52,7 +52,7 @@ os.makedirs(exp_dir)
 # copy code
 cpr_l = ["configs", "datasets", "magicdrive", "models", "tools", "utils"]
 cpf_l = ["guidance.py", "warp.py", "utility.py", TMP_SCRIPT, "shift_x.json"]
-ln_l = ["pretrained", "third_party"]
+ln_l = ["pretrained", "third_party", "BEVFormer", "MapTR"]
 
 for cp in cpr_l:
     shutil.copytree(cp, f"{exp_dir}/{cp}")

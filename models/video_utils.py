@@ -333,13 +333,14 @@ def render(
                     output_dict[k] = []
                     if save_images:
                         os.makedirs(save_path.replace(".mp4", f"_{k}"), exist_ok=True)
+                        sample_token = image_infos['sample_tokens'][0] if image_infos['is_key_frame'].item() is True else ''
                         imageio.imwrite(
-                            save_path.replace(".mp4", f"_{k}/{num_frames:03d}_.png"),
+                            save_path.replace(".mp4", f"_{k}/{num_frames:03d}_{sample_token}_.png"),
                             frame,
                         )
                         for cam_name, cam_frame in zip(output_dict['cam_names'], cam_frames):
                             imageio.imwrite(
-                                save_path.replace(".mp4", f"_{k}/{num_frames:03d}_{cam_name}.png"),
+                                save_path.replace(".mp4", f"_{k}/{num_frames:03d}_{sample_token}_{cam_name}.png"),
                                 to8b(cam_frame),
                             )
                 except Exception as e:

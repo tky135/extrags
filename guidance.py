@@ -82,6 +82,10 @@ def normalize_image_v2(image:torch.Tensor):
 
 def normalize_image_v0(image:torch.Tensor):
     return image
+def normalize_image_v3(image:torch.Tensor):
+    mean = image.mean(dim=[0, 3, 4], keepdim=True)
+    image = image - mean
+    return image
 
 
 def move_to(obj, device, filter=lambda x: True):

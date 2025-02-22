@@ -890,10 +890,9 @@ class VanillaGaussians(nn.Module):
                     _quats=activated_rotations[filter_mask].detach(),
                 )
             elif is_diffusion_step and not is_uncertainty:
-                raise Exception
                 with torch.no_grad():
                     uncertainty_pdf = self.get_uncertainty(viewdirs, py=True).unsqueeze(-1).clip(0, 1)
-                    filtered_uncert_mask = uncertainty_pdf[filter_mask]
+                    filtered_uncert_mask = 1 - uncertainty_pdf[filter_mask]
                 
                 gs_dict = dict(
                     _means=output_means[filter_mask] * filtered_uncert_mask + output_means[filter_mask].detach() * (1 - filtered_uncert_mask),

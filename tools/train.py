@@ -601,7 +601,8 @@ def main(args):
                 save_only_model=True,
                 is_final=step == trainer.num_iters,
             )
-        
+        # don't save the first time to avoid overwriting
+        args.resume_from = None
         #----------------------------------------------------------------------------
         #------------------------    Cache Image Error    ---------------------------
         if (

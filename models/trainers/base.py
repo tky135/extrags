@@ -557,7 +557,7 @@ class BasicTrainer(nn.Module):
                 continue
             if not is_ground and class_name in ["Ground_gs"]:
                 continue
-            gs = self.models[class_name].get_gaussians(cam, is_uncertainty, is_diffusion_step=False)
+            gs = self.models[class_name].get_gaussians(cam, is_uncertainty, is_diffusion_step=is_diffusion_step)
             if gs is None:
                 continue
     

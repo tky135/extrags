@@ -176,7 +176,7 @@ class VanillaGaussians(nn.Module):
         # norm = torch.sum(self._uncertainty ** 2, dim=(1, 2))
         # pdf = pdf_unnorm / (norm + 1e-10)
         if self.alpha_cum is not None:
-            pdf = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 9
+            pdf = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 6
             # pdf = 1 - torch.exp(-pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 25)
             print(f"{self.class_prefix}, alpha_cum: {self.alpha_cum.mean()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}, max: {pdf.max()}, min: {pdf.min()}, std: {pdf.std()}")
         else:

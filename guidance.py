@@ -60,8 +60,95 @@ NameMapping = {
 
 import lpips
 import torch.nn as nn
+import torch
+from torch import Tensor
+from torch.nn import functional as F
+
+
+def calc_mean_std(feat: Tensor, eps=1e-5):
+    """Calculate mean and std for adaptive_instance_normalization.
+    Args:
+        feat (Tensor): 4D tensor.
+        eps (float): A small value added to the variance to avoid
+            divide-by-zero. Default: 1e-5.
+    """
+    size = feat.size()
+    assert len(size) == 4, "The input feature should be 4D tensor."
+    b, c = size[:2]
+    feat_var = feat.reshape(b, c, -1).var(dim=2) + eps
+    feat_std = feat_var.sqrt().reshape(b, c, 1, 1)
+    feat_mean = feat.reshape(b, c, -1).mean(dim=2).reshape(b, c, 1, 1)
+    return feat_mean, feat_std
+
+
+def adaptive_instance_normalization(content_feat: Tensor, style_feat: Tensor):
+    """Adaptive instance normalization.
+    Adjust the reference features to have the similar color and illuminations
+    as those in the degradate features.
+    Args:
+        content_feat (Tensor): The reference feature.
+        style_feat (Tensor): The degradate features.
+    """
+    size = content_feat.size()
+    style_mean, style_std = calc_mean_std(style_feat)
+    content_mean, content_std = calc_mean_std(content_feat)
+    normalized_feat = (content_feat - content_mean.expand(size)) / content_std.expand(size)
+    return normalized_feat * style_std.expand(size) + style_mean.expand(size)
+
+
+def wavelet_blur(image: Tensor, radius: int):
+    """
+    Apply wavelet blur to the input tensor.
+    """
+    # input shape: (1, 3, H, W)
+    # convolution kernel
+    kernel_vals = [
+        [0.0625, 0.125, 0.0625],
+        [0.125, 0.25, 0.125],
+        [0.0625, 0.125, 0.0625],
+    ]
+    kernel = torch.tensor(kernel_vals, dtype=image.dtype, device=image.device)
+    # add channel dimensions to the kernel to make it a 4D tensor
+    kernel = kernel[None, None]
+    # repeat the kernel across all input channels
+    kernel = kernel.repeat(3, 1, 1, 1)
+    image = F.pad(image, (radius, radius, radius, radius), mode="replicate")
+    # apply convolution
+    output = F.conv2d(image, kernel, groups=3, dilation=radius)
+    return output
+
+
+def wavelet_decomposition(image: Tensor, levels=5):
+    """
+    Apply wavelet decomposition to the input tensor.
+    This function only returns the low frequency & the high frequency.
+    """
+    high_freq = torch.zeros_like(image)
+    for i in range(levels):
+        radius = 2**i
+        low_freq = wavelet_blur(image, radius)
+        high_freq += image - low_freq
+        image = low_freq
+
+    return high_freq, low_freq
+
+
+def wavelet_reconstruction(content_feat: Tensor, style_feat: Tensor):
+    """
+    Apply wavelet decomposition, so that the content will have the same color as the style.
+    """
+    # calculate the wavelet decomposition of the content feature
+    content_high_freq, content_low_freq = wavelet_decomposition(content_feat)
+    del content_low_freq
+    # calculate the wavelet decomposition of the style feature
+    style_high_freq, style_low_freq = wavelet_decomposition(style_feat)
+    del style_high_freq
+    # reconstruct the content feature with the style's high frequency
+    return content_high_freq + style_low_freq
+
+
 def normalize_image(image:torch.Tensor):
-    return normalize_image_v1(image)
+    return normalize_image_v2(image)
 def normalize_image_v1(image:torch.Tensor):
     """
     image with shape [b, 6, 3, 224, 400]
@@ -486,8 +573,7 @@ class MagicDrive:
         self.mgd_order = ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT']
 
 
-
-        self.data_pipeline_cfg = [{'type': 'LoadMultiViewImageFromFiles', 'to_float32': True}, 
+        data_cfg_224x400 = [{'type': 'LoadMultiViewImageFromFiles', 'to_float32': True}, 
         {'type': 'LoadAnnotations3D', 'with_bbox_3d': True, 'with_label_3d': True, 'with_attr_label': False}, 
         {'type': 'ImageAug3D', 'final_dim': [224, 400], 'resize_lim': [0.25, 0.25], 'bot_pct_lim': [0.0, 0.0], 'rot_lim': [0.0, 0.0], 'rand_flip': False, 'is_train': False}, 
         {'type': 'GlobalRotScaleTrans', 'resize_lim': [1.0, 1.0], 'rot_lim': [0.0, 0.0], 'trans_lim': 0, 'is_train': True}, 
@@ -497,6 +583,44 @@ class MagicDrive:
         {'type': 'ImageNormalize', 'mean': [0.5, 0.5, 0.5], 'std': [0.5, 0.5, 0.5]}, 
         {'type': 'DefaultFormatBundle3D', 'classes': ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']}, 
         {'type': 'Collect3D', 'keys': ['img', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_masks_bev'], 'meta_keys': ['camera_intrinsics', 'lidar2ego', 'lidar2camera', 'camera2lidar', 'lidar2image', 'img_aug_matrix'], 'meta_lis_keys': ['timeofday', 'location', 'description', 'filename', 'token']}]
+
+
+        data_cfg_424x800 = [{'type': 'LoadMultiViewImageFromFiles', 'to_float32': True}, 
+        {'type': 'LoadAnnotations3D', 'with_bbox_3d': True, 'with_label_3d': True, 'with_attr_label': False}, 
+        {'type': 'ImageAug3D', 'final_dim': [424, 800], 'resize_lim': [0.25, 0.25], 'bot_pct_lim': [0.0, 0.0], 'rot_lim': [0.0, 0.0], 'rand_flip': False, 'is_train': False}, 
+        {'type': 'GlobalRotScaleTrans', 'resize_lim': [1.0, 1.0], 'rot_lim': [0.0, 0.0], 'trans_lim': 0, 'is_train': True}, 
+        {'type': 'ObjectNameFilterM', 'classes': ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']}, 
+        {'type': 'LoadBEVSegmentationM', 'dataset_root': self.nuscenes_root, 'xbound': [-50.0, 50.0, 0.25], 'ybound': [-50.0, 50.0, 0.25], 'classes': ['drivable_area', 'ped_crossing', 'walkway', 'stop_line', 'carpark_area', 'road_divider', 'lane_divider', 'road_block'], 'object_classes': None, 'aux_data': None, 'cache_file': None}, 
+        {'type': 'ReorderMultiViewImagesM', 'order': ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT'], 'safe': False}, 
+        {'type': 'ImageNormalize', 'mean': [0.5, 0.5, 0.5], 'std': [0.5, 0.5, 0.5]}, 
+        {'type': 'DefaultFormatBundle3D', 'classes': ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']}, 
+        {'type': 'Collect3D', 'keys': ['img', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_masks_bev'], 'meta_keys': ['camera_intrinsics', 'lidar2ego', 'lidar2camera', 'camera2lidar', 'lidar2image', 'img_aug_matrix'], 'meta_lis_keys': ['timeofday', 'location', 'description', 'filename', 'token']}]
+
+
+        # data_cfg_424x800_train = [{'type': 'LoadMultiViewImageFromFiles', 'to_float32': True}, 
+        # {'type': 'LoadAnnotations3D', 'with_bbox_3d': True, 'with_label_3d': True, 'with_attr_label': False}, 
+        # {'type': 'ImageAug3D', 'final_dim': [424, 800], 'resize_lim': [0.5, 0.5], 'bot_pct_lim': [0.0, 0.0], 'rot_lim': None, 'rand_flip': False, 'is_train': False}, 
+        # {'type': 'GlobalRotScaleTrans', 'resize_lim': [1.0, 1.0], 'rot_lim': [0.0, 0.0], 'trans_lim': 0, 'is_train': True}, 
+        # {'type': 'ObjectNameFilterM', 'classes': ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']}, 
+        # {'type': 'LoadBEVSegmentationM', 'dataset_root': 'data/nuscenes/', 'xbound': [-50.0, 50.0, 0.25], 'ybound': [-50.0, 50.0, 0.25], 'classes': ['drivable_area', 'ped_crossing', 'walkway', 'stop_line', 'carpark_area', 'road_divider', 'lane_divider', 'road_block'], 'object_classes': None, 'aux_data': None, 'cache_file': 'data/nuscenes_mmdet3d_2/../nuscenes_map_aux/train_26x400x400_map_aux_full.h5'}, 
+        # {'type': 'RandomFlip3DwithViews', 'flip_ratio': 0.0, 'direction': None}, 
+        # {'type': 'ReorderMultiViewImagesM', 'order': ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT'], 'safe': False}, 
+        # {'type': 'ImageNormalize', 'mean': [0.5, 0.5, 0.5], 'std': [0.5, 0.5, 0.5]}, 
+        # {'type': 'DefaultFormatBundle3D', 'classes': ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']}, 
+        # {'type': 'Collect3D', 'keys': ['img', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_masks_bev'], 'meta_keys': ['camera_intrinsics', 'lidar2ego', 'lidar2camera', 'camera2lidar', 'lidar2image', 'img_aug_matrix'], 'meta_lis_keys': ['timeofday', 'location', 'description', 'filename', 'token']}]
+        
+        # data_cfg_424x800_test = [{'type': 'LoadMultiViewImageFromFiles', 'to_float32': True}, 
+        # {'type': 'LoadAnnotations3D', 'with_bbox_3d': True, 'with_label_3d': True, 'with_attr_label': False}, 
+        # {'type': 'ImageAug3D', 'final_dim': [424, 800], 'resize_lim': [0.5, 0.5], 'bot_pct_lim': [0.0, 0.0], 'rot_lim': [0.0, 0.0], 'rand_flip': False, 'is_train': False}, 
+        # {'type': 'GlobalRotScaleTrans', 'resize_lim': [1.0, 1.0], 'rot_lim': [0.0, 0.0], 'trans_lim': 0, 'is_train': True}, 
+        # {'type': 'ObjectNameFilterM', 'classes': ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']}, 
+        # {'type': 'LoadBEVSegmentationM', 'dataset_root': 'data/nuscenes/', 'xbound': [-50.0, 50.0, 0.25], 'ybound': [-50.0, 50.0, 0.25], 'classes': ['drivable_area', 'ped_crossing', 'walkway', 'stop_line', 'carpark_area', 'road_divider', 'lane_divider', 'road_block'], 'object_classes': None, 'aux_data': None, 'cache_file': 'data/nuscenes_mmdet3d_2/../nuscenes_map_aux/val_26x400x400_map_aux_full.h5'}, 
+        # {'type': 'ReorderMultiViewImagesM', 'order': ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT'], 'safe': False}, 
+        # {'type': 'ImageNormalize', 'mean': [0.5, 0.5, 0.5], 'std': [0.5, 0.5, 0.5]}, 
+        # {'type': 'DefaultFormatBundle3D', 'classes': ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']}, 
+        # {'type': 'Collect3D', 'keys': ['img', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_masks_bev'], 'meta_keys': ['camera_intrinsics', 'lidar2ego', 'lidar2camera', 'camera2lidar', 'lidar2image', 'img_aug_matrix'], 'meta_lis_keys': ['timeofday', 'location', 'description', 'filename', 'token']}]
+
+        self.data_pipeline_cfg = data_cfg_224x400
 
         self.data_pipeline = []
 
@@ -792,9 +916,9 @@ class MagicDrive:
                     )
 
                     model_pred = model_pred_uncod + 2 * (model_pred - model_pred_uncod)
-                    output = self.noise_scheduler.step(model_pred[0], i, noisy_latents[0], inpainting_mask_vae=inpainting_mask_vae[0].half(), gt_vae_latents=sds_img_vae[0])
+                    output = self.noise_scheduler.step(model_pred[0], i, noisy_latents[0], inpainting_mask_vae=inpainting_mask_vae[0].half(), gt_vae_latents=sds_img_vae[0], stochastic=False)
                     noisy_latents = output['prev_sample'].unsqueeze(0).half()
-                self.save_image0_from_latents(noisy_latents, f"noisy_latents_{step}.png")
+                self.save_image0_from_latents(noisy_latents, f"noisy_latents_{step}_{sample_token}.png")
             noisy_latents = noisy_latents.detach()
             bs = len(noisy_latents)
             noisy_latents = 1 / self.vae.config.scaling_factor * noisy_latents
@@ -1018,6 +1142,14 @@ class MagicDrive:
             # image = (image / 2 + 0.5).clamp(0, 1)
 
             unnorm_img = image.detach().clone()
+
+
+            # style_shifted_image = wavelet_reconstruction(image.squeeze(0), batch['pixel_values'].squeeze(0)).unsqueeze(0)
+            # self.save_image0_from_pixels(style_shifted_image, f"style_shifted_image_{step}.png")
+            # self.save_image0_from_pixels(batch['pixel_values'], f"input_image_{step}.png")
+            # self.save_image0_from_pixels(image, f"targe_image_{step}.png")
+            # import ipdb ; ipdb.set_trace()
+
             image = normalize_image(image.float())
             batch['pixel_values'] = normalize_image(batch['pixel_values'])
 
@@ -1364,6 +1496,7 @@ def argument_search():
 
 if __name__ == "__main__":
     mgd = MagicDrive(sd_path="pretrained/stable-diffusion-v1-5", checkpoint_path="pretrained/SDv1.5mv-rawbox_2023-09-07_18-39_224x400")
+    # mgd = MagicDrive(sd_path="pretrained/stable-diffusion-v1-5", checkpoint_path="pretrained/large_mgd")
     mgd.set_scene(605)
     mgd.prepare_data_pipeline()
 
@@ -1381,7 +1514,7 @@ if __name__ == "__main__":
     # 556a590f3e1741fb87d7e4dc8ea687e4
 
     method = 'multistep'
-    pt_path_prefix = "experiments/0050_uncertainty_mask_diffusion"
+    pt_path_prefix = "/home/kaiyuan.tan"
     iter_list = [31500, 31900, 30400, 30600, 31600, 32200]
     scene_idx = [40, 605, 516]
     pt_prefix = [("save_dict_" + str(i) + "_" + str(j), i, j) for i in scene_idx for j in iter_list]
@@ -1390,8 +1523,9 @@ if __name__ == "__main__":
     for pt_path, scene, it in iterable:
         print(pt_path, scene, it)
         save_dict = torch.load(pt_path)
+        # save_dict['pred_rgb'] = F.interpolate(save_dict['pred_rgb'].squeeze(0), size=(424, 800), mode='bilinear', align_corners=False).unsqueeze(0)
         if method == 'direct':
-            mgd.get_loss(pred_rgb=save_dict['pred_rgb'], sample_token=save_dict['sample_token'], timestep=500, shift_x=3, step=0, method='direct', inpainting_mask=torch.ones_like(save_dict['inpainting_mask']))
+            mgd.get_loss(pred_rgb=save_dict['pred_rgb'], sample_token=save_dict['sample_token'], timestep=500, shift_x=save_dict['shift_x'], step=it, method='direct', inpainting_mask=torch.ones_like(save_dict['inpainting_mask']), scene_idx=0)
         elif method in ['sds', 'multistep', 'anneal', 'repaint', 'repaint2']:
             # sds
             image_params = torch.nn.Parameter(save_dict['pred_rgb'].cuda(), requires_grad=True)

@@ -52,6 +52,7 @@ class MultiTrainer(BasicTrainer):
         self.render_each_class = True
 
 
+        # self.mgd = MagicDrive(sd_path="pretrained/stable-diffusion-v1-5", checkpoint_path="pretrained/large_mgd", version=self.version)
         self.mgd = MagicDrive(sd_path="pretrained/stable-diffusion-v1-5", checkpoint_path="pretrained/SDv1.5mv-rawbox_2023-09-07_18-39_224x400", version=self.version)
         self.mgd.prepare_data_pipeline()
 

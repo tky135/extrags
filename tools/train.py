@@ -364,6 +364,7 @@ def main(args):
     #     shift_x=max(shift_x_l)
     # )
 
+    sample2shift_vec = dict()
     for step in metric_logger.log_every(all_iters, cfg.logging.print_freq):
 
         # update shift set every 2000 steps
@@ -429,6 +430,9 @@ def main(args):
                     
                     image_6_views_ts = F.interpolate(image_6_views_ts, size=(224, 400), mode='bilinear', align_corners=False)
                     inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(224, 400), mode='nearest')
+                    # image_6_views_ts = F.interpolate(image_6_views_ts, size=(424, 800), mode='bilinear', align_corners=False)
+                    # inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(424, 800), mode='nearest')
+                    
                     image_6_views_ts = (image_6_views_ts.unsqueeze(0) - 0.5) * 2.0
                     trainer.mgd.save_image0_from_pixels(image_6_views_ts, f'image_6_views_{timestamp_counter}.png')
                     trainer.mgd.save_image0_from_pixels(inpainting_mask_6_views_ts.unsqueeze(0), f'inpainting_mask_6_views_{timestamp_counter}.png')
@@ -658,8 +662,8 @@ def main(args):
                 diff_loss_weight = 5e-4
             elif diff_method == 'multistep':
                 lower_bound = 50
-                upper_bound = 100
-                diff_loss_weight = 1e-4
+                upper_bound = 500
+                diff_loss_weight = 1e-4 / 2
             
 
 
@@ -719,8 +723,18 @@ def main(args):
                 # get shift vector in world coordinate
                 if diff_cam_infos['cam_name'][0] == 'CAM_FRONT': # TODO Assuming x axis of CAM_FRONT is the same as LiDAR
                     c2w = diff_cam_infos['camera_to_world'].clone()
-                    cam_x_axis_w = c2w[:3, :3] @ torch.tensor([1, 0, 0], device=c2w.device, dtype=c2w.dtype)
-                    cam_shift_vector_w = -cam_x_axis_w * shift_x
+                    cam_shift_vector_w = torch.tensor([-shift_x, 0, 0], device=c2w.device, dtype=c2w.dtype)
+
+                    frame_idx = diff_image_infos['frame_idx'].flatten()[0].item()
+
+                    lidar2w = dataset.lidar_source.lidar_to_worlds[frame_idx].to(device=c2w.device, dtype=c2w.dtype)
+                    lidar_shift_vector = lidar2w[:3, :3] @ cam_shift_vector_w
+
+                    if current_sample_token in sample2shift_vec:
+                        assert torch.allclose(sample2shift_vec[current_sample_token], lidar_shift_vector.cpu())
+                    else:
+                        sample2shift_vec[current_sample_token] = lidar_shift_vector.cpu()
+                    
                 
                 # shift camera
                 c2w = diff_cam_infos['camera_to_world'].clone()
@@ -762,8 +776,7 @@ def main(args):
                 # get shift vector in world coordinate
                 if diff_cam_infos['cam_name'][0] == 'CAM_FRONT': # TODO Assuming x axis of CAM_FRONT is the same as LiDAR
                     c2w = diff_cam_infos['camera_to_world'].clone()
-                    cam_x_axis_w = c2w[:3, :3] @ torch.tensor([1, 0, 0], device=c2w.device, dtype=c2w.dtype)
-                    cam_shift_vector_w = -cam_x_axis_w * shift_x
+                    cam_shift_vector_w = torch.tensor([-shift_x, 0, 0], device=c2w.device, dtype=c2w.dtype)
                 
                 # shift camera
                 c2w = diff_cam_infos['camera_to_world'].clone()
@@ -792,6 +805,9 @@ def main(args):
             inpainting_mask_6_views_ts = torch.stack(inpainting_mask_6_views_l, dim=0)
             image_6_views_ts = F.interpolate(image_6_views_ts, size=(224, 400), mode='bilinear', align_corners=False)
             inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(224, 400), mode='bilinear')
+            # image_6_views_ts = F.interpolate(image_6_views_ts, size=(424, 800), mode='bilinear', align_corners=False)
+            # inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(424, 800), mode='bilinear')
+            
             inpainting_mask_6_views_ts = (1 - inpainting_mask_6_views_ts).clip(0, 1)
             inpainting_mask_6_views_ts = dilate(inpainting_mask_6_views_ts, kernel_size=45, gaussian=True).clip(0, 1)
             image_6_views_ts = (image_6_views_ts.unsqueeze(0) - 0.5) * 2.0
@@ -808,7 +824,7 @@ def main(args):
             
 
             inpainting_mask_6_views_ts_ss = inpainting_mask_6_views_ts.reshape(image_6_views_ts.shape)
-            image_6_views_ts = image_6_views_ts * inpainting_mask_6_views_ts_ss + (1 - inpainting_mask_6_views_ts_ss) * image_6_views_ts.detach()
+            image_6_views_ts = image_6_views_ts * inpainting_mask_6_views_ts_ss + (1 - inpainting_mask_6_views_ts_ss) * image_6_views_ts
 
             kwargs = {
                 "resample": 2,
@@ -820,7 +836,7 @@ def main(args):
                 "scene_idx": trainer.scene_idx
             }
 
-            loss, retdict = trainer.mgd.get_loss(image_6_views_ts, current_sample_token, None, shift_x=shift_x, step=step, method=diff_method, inpainting_mask=(inpainting_mask_6_views_ts > 0).float(), **kwargs)
+            loss, retdict = trainer.mgd.get_loss(image_6_views_ts, current_sample_token, None, shift_x=shift_x, step=step, method=diff_method, inpainting_mask=torch.ones_like(inpainting_mask_6_views_ts), **kwargs)
 
             loss *= diff_loss_weight
 
@@ -876,7 +892,8 @@ def main(args):
             trainer.postprocess_per_train_step(step=step, diff_grad=True, do_refinement=False)
 
             
-    
+    with open(os.path.join(trainer.log_dir, "sample2shift_vec.json"), 'w') as f:
+        json.dump({k: v.tolist() for k, v in sample2shift_vec.items()}, f)
     logger.info("Training done!")
     
     if trainer.export_neus_2dgs:

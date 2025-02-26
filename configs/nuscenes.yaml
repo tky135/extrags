@@ -6,7 +6,7 @@ trainer:
   type: models.trainers.MultiTrainer
   ground_method: neus # [neus, rsg]
   optim:
-    num_iters: 40000
+    num_iters: 50000
     lidar_pretrain_iters: 0
     use_grad_scaler: false
     cache_buffer_freq: -1 # we use error based image sampler for training with more than 3 cameras

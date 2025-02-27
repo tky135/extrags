@@ -252,6 +252,10 @@ def main(args):
             ckpt_path=args.resume_from,
             load_only_model=True
         )
+        state_dict = torch.load(args.resume_from, map_location="cpu")
+        if 'Ground_gs' not in state_dict['models'] and trainer.ground_method == 'rsg':
+            trainer.neus23dgs()
+        del state_dict
         logger.info(
             f"Resuming training from {args.resume_from}, starting at step {trainer.step}"
         )

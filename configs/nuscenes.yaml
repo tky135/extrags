@@ -242,6 +242,32 @@ model:
   #     freeze_s: false
   #     freeze_shs_dc: false
   #     freeze_shs_rest: false
+  Ground_gs:
+    type: models.gaussians.VanillaGaussians
+    gaussian_2d: True
+    ground_gs: True
+    sdf_grad: False
+    # clip_scale: 0.05
+    # reg:
+    #   # sharp_shape_reg:
+    #   #   w: 1.
+    #   #   step_interval: 10
+    #   #   max_gauss_ratio: 5.
+    #   # sparse_reg:
+    #   #   w: 0.1
+    #   #   start_step: 10000
+    #   max_s_square_reg:
+    #     w: 0.1
+    optim:
+      xyz:
+        lr: 6.4e-04
+        lr_final: 1.6e-06
+        scale_factor: 10.0
+    ctrl:
+      densify_grad_thresh: 0.00005
+      cull_alpha_thresh: 0.005
+      sh_degree: 3
+      sh_degree_interval: 10000
   Ground:
     type: models.modules.Ground
     pretrain_method: lidar # [egopose, lidar]

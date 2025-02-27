@@ -183,8 +183,8 @@ class BasicTrainer(nn.Module):
         for class_name, model in self.models.items():
             # if class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus', 'DeformableNodes', 'Background', 'Sky']:
             #     continue
-            if os.environ.get("IS_CONT") == "True" and class_name in ['CamPose', 'Ground']:
-                continue
+            # if os.environ.get("IS_CONT") == "True" and class_name in ['CamPose', 'Ground']:
+            #     continue
             self.param_groups_diffusion.update(model.get_param_groups())
                  
         groups_diffusion = []
@@ -251,8 +251,8 @@ class BasicTrainer(nn.Module):
         # get param groups first
         self.param_groups_all = {}
         for class_name, model in self.models.items():
-            if os.environ.get("IS_CONT") == "True" and class_name in ['CamPose', 'Ground']:
-                continue
+            # if os.environ.get("IS_CONT") == "True" and class_name in ['CamPose', 'Ground']:
+            #     continue
             self.param_groups_all.update(model.get_param_groups())
                  
         groups_all = []
@@ -442,6 +442,7 @@ class BasicTrainer(nn.Module):
         
         if self.ground_method in ['rsg']:
             radii_ground = self.ground_info["radii"]
+            alphas_ground = self.ground_info["opacities"]
             if self.render_cfg.absgrad:
                 grads_ground = self.ground_info["means2d"].absgrad.clone()
             else:
@@ -461,10 +462,12 @@ class BasicTrainer(nn.Module):
                 if self.ground_method in ['rsg']:
                     self.models[class_name].postprocess_per_train_step(
                         step=step,
-                        optimizer=self.optimizer,
+                        optimizer=[self.optimizer_all, self.optimizer_diffusion],
                         radii=radii_ground[0, :],
+                        alphas=alphas_ground[0, :],
                         xys_grad=grads_ground[0, :],
-                        last_size=max(self.ground_info["width"], self.ground_info["height"])
+                        last_size=max(self.ground_info["width"], self.ground_info["height"]),
+                        do_refinement=do_refinement
                     )
             else:
                 gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
@@ -550,12 +553,12 @@ class BasicTrainer(nn.Module):
             "_opacities": [],
             "class_labels": [],
         }
-        if is_ground:
+        if (is_ground or is_uncertainty) and self.ground_method == 'rsg':
             gs_dict['align_error'] = []
         for class_name in self.gaussian_classes.keys():
-            if is_ground and class_name not in ["Ground_gs"]:
+            if is_ground and class_name not in ["Ground_gs"] and not is_uncertainty:
                 continue
-            if not is_ground and class_name in ["Ground_gs"]:
+            if not is_ground and class_name in ["Ground_gs"] and not is_uncertainty:
                 continue
             gs = self.models[class_name].get_gaussians(cam, is_uncertainty, is_diffusion_step=is_diffusion_step)
             if gs is None:
@@ -680,8 +683,12 @@ class BasicTrainer(nn.Module):
                 renders = renders[0]
                 alphas = alphas[0].squeeze(-1)
                 assert self.render_cfg.batch_size == 1, "batch size must be 1, will support batch size > 1 in the future"
-                assert renders.shape[-1] == 4, f"Must render rgb, depth and alpha"
-                rendered_rgb, rendered_depth = torch.split(renders, [3, 1], dim=-1)
+                # assert renders.shape[-1] == 4, f"Must render rgb, depth and alpha"
+                if renders.shape[-1] == 4: 
+                    rendered_rgb, rendered_depth = torch.split(renders, [3, 1], dim=-1)
+                else:
+                    rendered_rgb = renders
+                    rendered_depth = None
                 # NOTE: normals [bs, h, w, c] and normals_from_depth [h, w, c] have different sizes;  
                 output = {
                     'rgb_gaussians': torch.clamp(rendered_rgb, max=1.0),
@@ -711,12 +718,14 @@ class BasicTrainer(nn.Module):
                 raise Exception
         else:
             results, self.ground_info = render_fn(method='2dgs', return_info=True)
-        
-        if self.training and not is_uncert:
-            if not is_ground:
-                self.info["means2d"].retain_grad()
+            if results['rgb_gaussians'].shape[-1] == 3:
+                pass
             else:
-                self.ground_info['means2d'].retain_grad()
+                raise Exception
+        if self.training and is_ground:
+            self.ground_info["means2d"].retain_grad()
+        elif self.training and not is_uncert:
+            self.info['means2d'].retain_grad()
         
         return results, render_fn
 
@@ -804,8 +813,10 @@ class BasicTrainer(nn.Module):
         total_loss = sum(loss for loss in loss_dict.values())
         self.grad_scaler.scale(total_loss).backward()
 
-        if self.models['Background']._uncertainty.grad is not None:
-            print("uncertainty mean grad", self.models['Background']._uncertainty.grad.mean())
+        # if self.models['Background']._uncertainty.grad is not None:
+        #     print("uncertainty mean grad", self.models['Background']._uncertainty.grad.abs().mean())
+        #     print("rgb mean grad", self.models['Background']._features_dc.grad.abs().mean())
+            
         self.optimizer_step(is_diffusion_step=is_diffusion_step)
         
         scale = self.grad_scaler.get_scale()
@@ -835,7 +846,7 @@ class BasicTrainer(nn.Module):
         if 'is_pseudo' not in image_infos:
             image_infos['is_pseudo'] = False
         loss_dict = {}
-        if 'Ground' in self.models:
+        if 'Ground' in self.models and self.ground_method == 'neus':
             ground_loss = self.models['Ground'].get_loss(outputs['ground'], image_infos, cam_infos)
             loss_dict.update(ground_loss)
         if True:
@@ -1072,8 +1083,8 @@ class BasicTrainer(nn.Module):
             model.step = step
             if class_name not in model_state_dict:
                 if class_name in self.gaussian_classes:
-                    self.gaussian_classes.pop(class_name)
-                logger.warning(f"Cannot find {class_name} in the checkpoint")
+                    # self.gaussian_classes.pop(class_name)
+                    logger.warning(f"Cannot find {class_name} in the checkpoint")
                 continue
             msg = model.load_state_dict(model_state_dict[class_name], strict=strict)
             logger.info(f"{class_name}: {msg}")

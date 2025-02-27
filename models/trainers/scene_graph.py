@@ -267,8 +267,9 @@ class MultiTrainer(BasicTrainer):
                     loss.backward()
                     self.models['Ground'].optimizer.step()
             # self.models['Ground'].validate_mesh()
-            if "Ground_gs" in self.models.keys():
+            if "Ground_gs" in self.models.keys() and self.ground_method == 'rsg':
                 self.neus23dgs()
+                
         # get instance points
         rigidnode_pts_dict, deformnode_pts_dict, smplnode_pts_dict = {}, {}, {}
         if "RigidNodes" in self.model_config:
@@ -342,6 +343,10 @@ class MultiTrainer(BasicTrainer):
                     model=model,
                     instance_pts_dict=smplnode_pts_dict
                 )
+            
+            if class_name == 'Ground_gs':
+                if self.ground_method != 'rsg':
+                    empty = True
                 
             if empty:
                 empty_classes.append(class_name)
@@ -456,7 +461,7 @@ class MultiTrainer(BasicTrainer):
 
         
         # 先渲染路面部分
-        if 'Ground' in self.models.keys():
+        if 'Ground' in self.models.keys() and self.ground_method == 'neus':
             # render ground
             image_infos['is_train'] = False
             ground_model = self.models['Ground']
@@ -727,6 +732,7 @@ class MultiTrainer(BasicTrainer):
         self,
         output_path="./point_cloud.ply",
     ):
+        return
         from plyfile import PlyData, PlyElement
         all_attributes = []
         for gs_name, gs_type in self.gaussian_classes.items():

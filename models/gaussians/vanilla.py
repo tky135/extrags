@@ -91,6 +91,78 @@ def apply_quaternion_rotation(quaternions, points):
         rotated_points.append(rotated_p_quat[1:])
     
     return np.array(rotated_points)
+
+def rotate_3d_vector(vector, angle_deg, axis):
+    """
+    使用旋转矩阵对3D向量进行旋转变换
+    
+    参数：
+    vector : torch.Tensor - 形状为[3]或[batch, 3]的输入向量
+    angle_deg : float - 旋转角度（度数）
+    axis : str - 旋转轴 ('x', 'y', 'z')
+    
+    返回：
+    torch.Tensor - 旋转后的向量
+    """
+    # 将角度转换为弧度
+    theta = torch.deg2rad(torch.tensor(angle_deg))
+    
+    # 根据旋转轴生成旋转矩阵
+    if axis == 'x':
+        rot_matrix = torch.tensor([
+            [1, 0, 0],
+            [0, torch.cos(theta), -torch.sin(theta)],
+            [0, torch.sin(theta), torch.cos(theta)]
+        ], dtype=torch.float32)
+    elif axis == 'y':
+        rot_matrix = torch.tensor([
+            [torch.cos(theta), 0, torch.sin(theta)],
+            [0, 1, 0],
+            [-torch.sin(theta), 0, torch.cos(theta)]
+        ], dtype=torch.float32)
+    elif axis == 'z':
+        rot_matrix = torch.tensor([
+            [torch.cos(theta), -torch.sin(theta), 0],
+            [torch.sin(theta), torch.cos(theta), 0],
+            [0, 0, 1]
+        ], dtype=torch.float32)
+    else:
+        raise ValueError("旋转轴必须是'x', 'y'或'z'")
+
+    # 执行矩阵乘法
+    return vector @ rot_matrix.T.to(vector.device)  # 自动处理批量维度
+
+def compound_rotation(vector):
+    # 绕Y轴旋转35.26度
+    step1 = rotate_3d_vector(vector, 35.26, 'y')
+    # 绕X轴旋转-45度
+    return rotate_3d_vector(step1, -45, 'x')
+
+def quaternion_rotate(quaternions, directions):
+    """
+    Rotate 3D directions by corresponding quaternions in batch.
+    
+    Args:
+        quaternions: Tensor of shape (N, 4) in (w, x, y, z) format
+        directions:  Tensor of shape (N, 3) containing 3D directions
+    
+    Returns:
+        rotated directions: Tensor of shape (N, 3)
+    """
+    # Normalize quaternions to ensure valid rotations
+    quaternions = torch.nn.functional.normalize(quaternions, dim=1)
+    
+    # Split quaternion components
+    q_w = quaternions[:, 0]
+    q_vec = quaternions[:, 1:]
+    
+    # Compute cross product terms using PyTorch's optimized batch operations
+    cross_term = torch.cross(q_vec, directions, dim=1)
+    rotated = (directions + 
+               (2 * q_w).unsqueeze(-1) * cross_term + 
+               2 * torch.cross(q_vec, cross_term, dim=1))
+    
+    return rotated
 class VanillaGaussians(nn.Module):
 
     def __init__(
@@ -143,6 +215,10 @@ class VanillaGaussians(nn.Module):
         self.max_2Dsize = None
         self.under_ground = None
         self._means = torch.zeros(1, 3, device=self.device)
+        # self.dirx_record = 0.0
+        # self.diry_record = 0.0
+        # self.dirz_record = 0.0
+        # self.dir_cum = 0
         if self.ball_gaussians:
             self._scales = torch.zeros(1, 1, device=self.device)
         else:
@@ -168,6 +244,13 @@ class VanillaGaussians(nn.Module):
     def get_uncertainty(self, directions, py=False):
         directions = F.normalize(directions, p=2, dim=-1)
 
+        # self.dirx_record += directions[:, 0].abs().mean()
+        # self.diry_record += directions[:, 1].abs().mean()
+        # self.dirz_record += directions[:, 2].abs().mean()
+        # self.dir_cum += 1
+        # print(f"{self.class_prefix}: dirx: {self.dirx_record / self.dir_cum}, diry: {self.diry_record / self.dir_cum}, dirz: {self.dirz_record / self.dir_cum}")
+        # directions = directions[:, [0, 2, 1]]
+
         normalized_coeffs = self._uncertainty / torch.norm(self._uncertainty, dim=(1, 2), keepdim=True).detach()
 
         coeffs = normalized_coeffs.repeat(1, 1, 3)
@@ -178,7 +261,7 @@ class VanillaGaussians(nn.Module):
         if self.alpha_cum is not None:
             pdf = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 6
             # pdf = 1 - torch.exp(-pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 25)
-            print(f"{self.class_prefix}, alpha_cum: {self.alpha_cum.mean()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}, max: {pdf.max()}, min: {pdf.min()}, std: {pdf.std()}")
+            print(f"{self.class_prefix}, alpha_cum_avg: {self.alpha_cum.mean()}, alpha_cum_max: {self.alpha_cum.max()}, alpha_cum_min: {self.alpha_cum.min()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}, max: {pdf.max()}, min: {pdf.min()}, std: {pdf.std()}")
         else:
             pdf = pdf_unnorm
             print(f"{self.class_prefix}, pdf: {pdf.mean()}, pdf_max: {pdf.max()}, pdf_min: {pdf.min()}, pdf_std: {pdf.std()}")
@@ -397,7 +480,7 @@ class VanillaGaussians(nn.Module):
         return self.get_gaussian_param_groups()
 
     def refinement_after(self, step, optimizer: List[torch.optim.Optimizer]) -> None:
-        if os.environ.get("IS_CONT", "False") == "True":
+        if self.ground_gs:
             return
         assert step == self.step
         if self.step <= self.ctrl_cfg.warmup_steps:
@@ -828,7 +911,7 @@ class VanillaGaussians(nn.Module):
         # actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
         
         
-        if self.ground_gs and os.environ.get("IS_CONT", "False") != "True":
+        if False:
             # 验证
             # self.sdf_network.sdf((output_means + self.omnire_w2neus_w[:3, 3].cuda()) @ torch.linalg.inv(self.scale_mat[:3, :3]))
             if self.sdf_grad:
@@ -851,7 +934,7 @@ class VanillaGaussians(nn.Module):
             # normals = 
         if self.ground_gs:
             # 2dgs
-            if os.environ.get("IS_CONT", "False") == "True":
+            if True:
                 gs_dict = dict(
                     _means=output_means.detach(),
                     _opacities=activated_opacities.detach(),
@@ -873,7 +956,7 @@ class VanillaGaussians(nn.Module):
             
         else:
             # 3dgs
-            if os.environ.get("IS_CONT", "False") == "True":
+            if False:
                 gs_dict = dict(
                     _means=output_means.detach(),
                     _opacities=activated_opacities.detach(),
@@ -939,7 +1022,7 @@ class VanillaGaussians(nn.Module):
     
     def compute_reg_loss(self):
         loss_dict = {}
-        if os.environ.get("IS_CONT", "False") == "True":
+        if self.ground_gs:
             return loss_dict
         sharp_shape_reg_cfg = self.reg_cfg.get("sharp_shape_reg", None)
         if sharp_shape_reg_cfg is not None:

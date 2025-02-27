@@ -40,4 +40,4 @@ sorted_fid = sorted(rank_fid_516.items(), key=lambda x: x[1])
 for i, (k, v) in enumerate(sorted_fid):
     print(f"{i+1}. {k} - {v}")
 
-os.system('find . -type f \( -name "*.pt" -o -name "*.ply" -o -name "*.pcd" \) -delete')
+os.system('find . -type f \( -name "*.pt" -o -name "*.ply" -o -name "*.pcd" -o -name "*.pth" \) -delete')

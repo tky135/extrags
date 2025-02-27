@@ -1053,7 +1053,7 @@ class Ground(nn.Module):
                                            before_affine, 
                                            after_affine])
                 right_right_col = np.concatenate([rsg, depth_normal, normal])
-                new_col = np.concatenate([img_fine[..., i], img_fine[..., i], img_fine[..., i]])
+                new_col = np.concatenate([img_fine[..., i], image_infos['uncertainty'].cpu().numpy() * 255, image_infos['opacity'].cpu().numpy() * 255])
                 # label_diff = np.abs(label_img[..., i] - label_img_gt)
                 # # label_diff[~road_mask] = 0
                 # label_cat = np.concatenate([label_img[..., i], label_img_gt, label_diff])

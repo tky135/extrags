@@ -242,7 +242,7 @@ class VanillaGaussians(nn.Module):
         self.alpha_cnt = 0
 
     def get_uncertainty(self, directions, py=False):
-        directions = F.normalize(directions, p=2, dim=-1)
+        directions_clone = F.normalize(directions, p=2, dim=-1).detach().clone()
 
         # self.dirx_record += directions[:, 0].abs().mean()
         # self.diry_record += directions[:, 1].abs().mean()
@@ -251,20 +251,20 @@ class VanillaGaussians(nn.Module):
         # print(f"{self.class_prefix}: dirx: {self.dirx_record / self.dir_cum}, diry: {self.diry_record / self.dir_cum}, dirz: {self.dirz_record / self.dir_cum}")
         # directions = directions[:, [0, 2, 1]]
 
-        normalized_coeffs = self._uncertainty / torch.norm(self._uncertainty, dim=(1, 2), keepdim=True).detach()
+        normalized_coeffs = self._uncertainty / (torch.norm(self._uncertainty, dim=(1, 2), keepdim=True).detach() + 1e-10)
 
         coeffs = normalized_coeffs.repeat(1, 1, 3)
-        f = spherical_harmonics(self.uncertainty_degree, directions, coeffs)[:, 0]
+        f = spherical_harmonics(self.uncertainty_degree, directions_clone, coeffs)[:, 0]
         pdf_unnorm = f ** 2
         # norm = torch.sum(self._uncertainty ** 2, dim=(1, 2))
         # pdf = pdf_unnorm / (norm + 1e-10)
         if self.alpha_cum is not None:
             pdf = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 6
             # pdf = 1 - torch.exp(-pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 25)
-            print(f"{self.class_prefix}, alpha_cum_avg: {self.alpha_cum.mean()}, alpha_cum_max: {self.alpha_cum.max()}, alpha_cum_min: {self.alpha_cum.min()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}, max: {pdf.max()}, min: {pdf.min()}, std: {pdf.std()}")
+            # print(f"{self.class_prefix}, alpha_cum_avg: {self.alpha_cum.mean()}, alpha_cum_max: {self.alpha_cum.max()}, alpha_cum_min: {self.alpha_cum.min()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}, max: {pdf.max()}, min: {pdf.min()}, std: {pdf.std()}")
         else:
             pdf = pdf_unnorm
-            print(f"{self.class_prefix}, pdf: {pdf.mean()}, pdf_max: {pdf.max()}, pdf_min: {pdf.min()}, pdf_std: {pdf.std()}")
+            # print(f"{self.class_prefix}, pdf: {pdf.mean()}, pdf_max: {pdf.max()}, pdf_min: {pdf.min()}, pdf_std: {pdf.std()}")
         return pdf
     
     @property
@@ -854,6 +854,18 @@ class VanillaGaussians(nn.Module):
         
         return result
     def get_gaussians(self, cam: dataclass_camera, is_uncertainty:bool=False, is_diffusion_step:bool = False) -> Dict:
+        # if True:
+        #     import open3d as o3d
+        #     pcd = o3d.geometry.PointCloud()
+        #     points = self._means.detach().cpu().numpy()
+        #     pcd.points = o3d.utility.Vector3dVector(points)
+        #     viewdirs = torch.zeros_like(self._means)
+        #     viewdirs[:, 2] = 1
+        #     colors = torch.cat((self._features_dc[:, None, :], self._features_rest), dim=1)
+        #     rgbs = spherical_harmonics(3, viewdirs, colors)
+        #     rgbs = torch.clamp(rgbs + 0.5, 0.0, 1.0).detach().cpu().numpy()
+        #     pcd.colors = o3d.utility.Vector3dVector(rgbs)
+        #     o3d.io.write_point_cloud("vis_background.pcd", pcd)
         filter_mask = torch.ones_like(self._means[:, 0], dtype=torch.bool)
         self.filter_mask = filter_mask
         # collect gaussians information
@@ -938,7 +950,7 @@ class VanillaGaussians(nn.Module):
                 gs_dict = dict(
                     _means=output_means.detach(),
                     _opacities=activated_opacities.detach(),
-                    _rgbs=actovated_colors,
+                    _rgbs=actovated_colors if not is_diffusion_step else actovated_colors.detach(), # not using diffusion to optimize ground for now
                     _scales=activated_scales.detach(),
                     _quats=activated_rotations.detach(),
                     align_error=torch.tensor(0.0).to(self.device),

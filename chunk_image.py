@@ -67,4 +67,4 @@ def split_image_into_chunks(image_path, rows=None, cols=None, chunk_size=None, o
 if __name__ == '__main__':
     import sys
     os.system("rm -rf .chunk_output")
-    chunks = split_image_into_chunks(sys.argv[1], rows=4, cols=4, output_dir='.chunk_output', output_format='png')
+    chunks = split_image_into_chunks(sys.argv[1], rows=8, cols=4, output_dir='.chunk_output', output_format='png')

@@ -157,11 +157,12 @@ def setup(args):
     dataset_type = cfg.data.data_root.split('/')[-1]
     scene_idx = str(cfg.data.scene_idx)
 
-    shift_x_dict = json.load(open("shift_x.json"))
-    if scene_idx in shift_x_dict[dataset_type]:
-        shift_x_l.extend(shift_x_dict[dataset_type][scene_idx])
-    else:
-        shift_x_l.extend([3.0])
+    # shift_x_dict = json.load(open("shift_x.json"))
+    shift_x_l.extend([-float(os.environ.get('shift_x'))])
+    # if scene_idx in shift_x_dict[dataset_type]:
+    #     shift_x_l.extend(shift_x_dict[dataset_type][scene_idx])
+    # else:
+    #     shift_x_l.extend([3.0])
     
     # update config and create log dir
     cfg.log_dir = log_dir
@@ -569,6 +570,8 @@ def main(args):
             # check nan or inf
             for k, v in loss_dict.items():
                 if torch.isnan(v).any():
+                    print(k)
+                    import ipdb ; ipdb.set_trace()
                     raise ValueError(f"NaN detected in loss {k} at step {step}")
                 if torch.isinf(v).any():
                     raise ValueError(f"Inf detected in loss {k} at step {step}")

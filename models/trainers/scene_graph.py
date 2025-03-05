@@ -236,6 +236,8 @@ class MultiTrainer(BasicTrainer):
             dataset.train_image_set.camera_downscale = 1.0
             pretrainit = dataset.train_image_set.get_iterator(num_workers=4, prefetch_factor=2)
             if pretrain_iters > 0 and not fast_run:
+                prev_render_full = self.models['Ground'].render_full
+                self.models['Ground'].render_full = False
                 from tqdm import trange
                 t = trange(pretrain_iters, desc='pretrain road surface', leave=True)
                 for step in t:
@@ -266,7 +268,7 @@ class MultiTrainer(BasicTrainer):
                     t.refresh()
                     loss.backward()
                     self.models['Ground'].optimizer.step()
-            # self.models['Ground'].validate_mesh()
+                self.models['Ground'].render_full = prev_render_full
             if "Ground_gs" in self.models.keys() and self.ground_method == 'rsg':
                 self.neus23dgs()
                 
@@ -322,6 +324,17 @@ class MultiTrainer(BasicTrainer):
                     valid_instances_dict=allnode_pts_dict
                 )
                 
+                # import ipdb ; ipdb.set_trace()
+                
+                # if 1:
+                #     import open3d as o3d
+                #     pcd = o3d.geometry.PointCloud()
+                #     points = processed_init_pts['pts'].cpu().numpy()
+                #     colors = processed_init_pts['colors'].cpu().numpy()
+                #     pcd.points = o3d.utility.Vector3dVector(points)
+                #     pcd.colors = o3d.utility.Vector3dVector(colors)
+                #     # write
+                #     o3d.io.write_point_cloud("lidar_init_noroad.pcd", pcd)
                 model.create_from_pcd(
                     init_means=processed_init_pts['pts'], init_colors=processed_init_pts['colors'], from_lidar=from_lidar[processed_init_pts['mask']]
                 )
@@ -421,6 +434,10 @@ class MultiTrainer(BasicTrainer):
             torch.abs(self.normalized_timestamps - normed_time)
         )
         
+        # get rid of ego vehicle from road
+        if 'egocar_masks' in image_infos.keys() and 'road_masks' in image_infos.keys():
+            image_infos['road_masks'] = image_infos['road_masks'] * (1 - image_infos['egocar_masks'])
+        
         # for evaluation
         for model in self.models.values():
             if hasattr(model, 'in_test_set'):
@@ -504,6 +521,12 @@ class MultiTrainer(BasicTrainer):
             outputs['ground_gs'] = outputs_ground
         
         # render uncertainty
+        # if self.step > self.uncertainty_start and self.step < self.diff_start:
+        
+        
+        
+        # detach processed_cam for uncertainty
+        processed_cam.camtoworlds = processed_cam.camtoworlds.detach()
         gs_uncert = self.collect_gaussians(
             cam=processed_cam,
             image_ids=None,
@@ -524,7 +547,7 @@ class MultiTrainer(BasicTrainer):
 
 
         # manually update uncertainty count
-        uncertainty_info = self.uncert_info
+        # uncertainty_info = self.uncert_info
 
 
 

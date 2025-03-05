@@ -14,6 +14,28 @@ import tinycudann as tcnn
 # import wandb
 logger = logging.getLogger()
 
+def diffuse_points(ego_points: torch.Tensor, M: int, sigma: float = 0.1) -> torch.Tensor:
+    """
+    Generate a diffused point set around the original 2D points.
+    
+    Args:
+        ego_points (torch.Tensor): Original points of shape [N, 2]
+        M (int): Number of diffused points to generate
+        sigma (float): Standard deviation of Gaussian noise controlling spread
+    
+    Returns:
+        torch.Tensor: Diffused points of shape [M, 2]
+    """
+    # Randomly select M original points (with replacement)
+    indices = torch.randint(low=0, high=len(ego_points), size=(M,))
+    selected_points = ego_points[indices]
+    
+    # Add Gaussian noise with specified standard deviation
+    noise = torch.randn_like(selected_points) * sigma
+    diffused_points = selected_points + noise
+    
+    return diffused_points
+
 class XYZ_Encoder(nn.Module):
     encoder_type = "XYZ_Encoder"
     """Encode XYZ coordinates or directions to a vector."""
@@ -476,10 +498,7 @@ class ExtrinsicOptModule(torch.nn.Module):
         Returns:
             updated camtoworlds: (..., 4, 4)
         """
-        try:
-            assert camtoworlds.shape[:-2] == embed_ids.shape
-        except:
-            import ipdb ; ipdb.set_trace()
+        assert camtoworlds.shape[:-2] == embed_ids.shape
         batch_shape = camtoworlds.shape[:-2]
         pose_deltas = self.embeds(embed_ids)  # (..., 9)
         dx, drot = pose_deltas[..., :3], pose_deltas[..., 3:]
@@ -1037,8 +1056,30 @@ class Ground(nn.Module):
         # road_mask = label_img_gt_raw > 0
         before_affine = image_infos['before_affine'].cpu().numpy() * 255 if 'before_affine' in image_infos else np.zeros_like(gt_img)
         after_affine = image_infos['after_affine'].cpu().numpy() * 255 if 'after_affine' in image_infos else np.zeros_like(gt_img)
-        rsg = image_infos['rsg'].cpu().numpy() * 255 if 'rsg' in image_infos else image_infos['uncertainty'].cpu().numpy() * 255
-        depth_normal = image_infos['depth_normal'].permute(1, 2, 0).numpy() if 'depth_normal' in image_infos else image_infos['opacity'].cpu().numpy() * 255
+        if 'rsg' in image_infos:
+            rsg = image_infos['rsg'].cpu().numpy() * 255
+        # elif 'uncertainty' in image_infos:
+            # rsg = image_infos['uncertainty'].cpu().numpy() * 255
+        else:
+            rsg = np.zeros_like(gt_img)
+
+        if 'depth_normal' in image_infos:
+            depth_normal = image_infos['depth_normal'].permute(1, 2, 0).numpy()
+        # elif 'opacity' in image_infos:
+        #     depth_normal = image_infos['opacity'].cpu().numpy() * 255
+        else:
+            depth_normal = np.zeros_like(gt_img)
+            
+        if 'uncertainty' in image_infos:
+            uncertainty = image_infos['uncertainty'].cpu().numpy() * 255
+        else:
+            uncertainty = np.zeros_like(gt_img)
+            
+        if 'opacity' in image_infos:
+            opacity = image_infos['opacity'].cpu().numpy() * 255
+        else:
+            opacity = np.zeros_like(gt_img)
+
         normal = image_infos['normal'].permute(1, 2, 0).numpy() if 'normal' in image_infos else np.zeros_like(gt_img)
         
         depth_blend = image_infos['depth_blend'] if 'depth_blend' in image_infos else np.zeros_like(gt_img)
@@ -1053,7 +1094,7 @@ class Ground(nn.Module):
                                            before_affine, 
                                            after_affine])
                 right_right_col = np.concatenate([rsg, depth_normal, normal])
-                new_col = np.concatenate([img_fine[..., i], image_infos['uncertainty'].cpu().numpy() * 255, image_infos['opacity'].cpu().numpy() * 255])
+                new_col = np.concatenate([img_fine[..., i], uncertainty, opacity])
                 # label_diff = np.abs(label_img[..., i] - label_img_gt)
                 # # label_diff[~road_mask] = 0
                 # label_cat = np.concatenate([label_img[..., i], label_img_gt, label_diff])

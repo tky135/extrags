@@ -735,13 +735,115 @@ class MagicDrive:
             info = self.collate_fn_preprocess(info)
             self.info_cache[sample_token] = info
         return self.info_cache[sample_token]
+    
+    def visualize_info_bbox(self, batch, save_prefix="./"):
+        bboxes = batch['kwargs']['bboxes_3d_data']['bboxes'].clone()
+
+        # bbox projection to image
+        import cv2
+        def project_3d_to_image(bboxes, lidar2img, img_shape):
+            """
+            bboxes: Tensor [N,8,3] (x,y,z in LiDAR坐标系)
+            lidar2img: Tensor [4,4] 投影矩阵
+            img_shape: (H, W, C) 图像尺寸
+            return: 
+                projected_boxes: List[N][8][2] 图像坐标 (过滤不可见点)
+                valid_mask: Tensor [N,8] 有效点标记
+            """
+            # 齐次坐标扩展
+            ones = torch.ones(bboxes.shape[0], 8, 1, device=bboxes.device)
+            homo_coords = torch.cat([bboxes, ones], dim=-1)  # [N,8,4]
+
+            # 坐标系转换
+            camera_coords = torch.einsum('ij,nkj->nki', lidar2img, homo_coords)  # [N,8,4]
+
+            # 透视除法 (排除深度<=0的点)
+            z = camera_coords[..., 2]
+            valid_depth = z > 1e-5  # 深度有效性判断
+            image_coords = camera_coords / z.unsqueeze(-1)  # [N,8,4]
+
+            # 坐标有效性判断
+            x, y = image_coords[..., 0], image_coords[..., 1]
+            valid_x = (x >= 0) & (x < img_shape[1])
+            valid_y = (y >= 0) & (y < img_shape[0])
+            valid_mask = valid_depth & valid_x & valid_y  # [N,8]
+
+            return image_coords[..., :2].cpu().numpy(), valid_mask.cpu().numpy()
+        
+        def draw_3d_boxes(img_tensor, projected_boxes, valid_mask, color=(0,255,0), thickness=10):
+            """
+            参数说明：
+            img_tensor: torch.Tensor [3, H, W] (RGB格式)
+            projected_boxes: np.ndarray [N, 8, 2] 投影后的图像坐标
+            valid_mask: np.ndarray [N, 8] 有效点标记
+            返回：
+            torch.Tensor [3, H, W] (与输入同格式)
+            """
+            # 转换张量为OpenCV格式
+            img_np = img_tensor.permute(1, 2, 0).contiguous().detach().cpu().numpy()
+            img_np = (img_np + 1) / 2  # 反归一化
+            if img_np.max() <= 1.0:  # 自动检测归一化输入
+                img_np = (img_np * 255).clip(0, 255)
+            img_cv = cv2.cvtColor(img_np.astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+            # 绘制逻辑
+            for box, mask in zip(projected_boxes, valid_mask):
+                visible_edges = []
+                
+                # 底面四边形有效性判断
+                if np.sum(mask[[0,1,2,3]]) >= 3:
+                    visible_edges += [(0,1),(1,2),(2,3),(3,0)]
+                
+                # 顶面四边形有效性判断
+                if np.sum(mask[[4,5,6,7]]) >= 3:
+                    visible_edges += [(4,5),(5,6),(6,7),(7,4)]
+                
+                # 立柱有效性判断
+                vertical_edges = [(i,i+4) for i in range(4)]
+                for i,j in vertical_edges:
+                    if mask[i] and mask[j]:
+                        visible_edges.append((i,j))
+
+                # 坐标转换与绘制
+                for (i,j) in visible_edges:
+                    pt1 = tuple(np.round(box[i]).astype(int))
+                    pt2 = tuple(np.round(box[j]).astype(int))
+                    img_cv = cv2.line(img_cv, pt1, pt2, color, thickness)
+
+            # 转换回原始张量格式
+            result_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
+            if img_tensor.dtype == torch.float32:  # 保持输入数据类型
+                result_rgb = result_rgb.astype(np.float32) / 255.0
+                result_rgb = result_rgb * 2 - 1
+                
+            return torch.from_numpy(result_rgb).permute(2, 0, 1).to(img_tensor.device)
+        
+        lidar2images = batch['meta_data']['lidar2image'][0].data    
+        lidar_bboxes_all = bboxes[0]
+        bbox_height = lidar_bboxes_all[:, :, 1, 2] - lidar_bboxes_all[:, :, 0, 2]
+
+        lidar_bboxes_all[..., 2] -= bbox_height.unsqueeze(-1) / 2
+        # mgd assumes a translation of 0.5 in z
+        
+        with torch.no_grad():
+            for i in range(6):
+                lidar_bboxes = lidar_bboxes_all[i]
+                image_bboxes, valid_mask = project_3d_to_image(lidar_bboxes, lidar2images[i].to(lidar_bboxes.device), (900, 1600))
+                img = F.interpolate(batch['pixel_values'][0][i].detach().unsqueeze(0), size=(900, 1600), mode='bilinear').squeeze(0)
+                img = draw_3d_boxes(img, image_bboxes, valid_mask)
+                import torchvision
+                img = img * 0.5 + 0.5
+                img = img * 255
+                img = img.cpu().type(torch.uint8)
+                torchvision.io.write_png(img, f"{save_prefix}_bbox_{i}.png")
+
     def get_loss(self, pred_rgb, sample_token, timestep, shift_x, step, method, inpainting_mask=None, **kwargs):
         """
         pred_rgb: [1, 6, 3, 224, 400]
         """
-        if step % 100 == 0:
-            save_dict = {'pred_rgb': pred_rgb, 'sample_token': sample_token, 'timestep': timestep, 'shift_x': shift_x, 'step': step, 'method': method, 'inpainting_mask': inpainting_mask}
-            torch.save(save_dict, f"save_dict_{kwargs['scene_idx']}_{step}_{sample_token}.pt")
+        # if step % 100 == 0:
+        #     save_dict = {'pred_rgb': pred_rgb, 'sample_token': sample_token, 'timestep': timestep, 'shift_x': shift_x, 'step': step, 'method': method, 'inpainting_mask': inpainting_mask}
+        #     torch.save(save_dict, f"save_dict_{kwargs['scene_idx']}_{step}_{sample_token}.pt")
         
         # get sample info
         info = self.get_info(sample_token, shift_x)
@@ -761,6 +863,8 @@ class MagicDrive:
         batch['kwargs']['bboxes_3d_data']['bboxes'] = bboxes
         
 
+
+        # self.visualize_info_bbox(batch, save_prefix=f"bbox_{kwargs['scene_idx']}_{step}_{sample_token}")
         # set controlnet to unconditional
         self.controlnet_unet.train()
         self.controlnet_unet.controlnet.drop_cond_ratio = 0.0

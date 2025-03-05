@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 import heapq
 
 UNLIMITED = 100_0000
-key_frame_limit = 20 * 6
+key_frame_limit = UNLIMITED * 6
 
 
 class SplitWrapper(torch.utils.data.IterableDataset):

@@ -915,6 +915,8 @@ class BasicTrainer(nn.Module):
                 # torchvision.io.write_png(gt_depth_save, f"gt_depth_{self.step}.png")
                 # import ipdb ; ipdb.set_trace()
                 depth_loss = self.depth_loss_fn(pred_depth, gt_depth, lidar_hit_mask)
+                if torch.isnan(depth_loss):
+                    depth_loss = torch.tensor(0., device=self.device)
                 
                 lidar_w_decay = self.losses_dict.depth.get("lidar_w_decay", -1)
                 if lidar_w_decay > 0 and self.step > self.lidar_pretrain_iters:
@@ -1020,7 +1022,7 @@ class BasicTrainer(nn.Module):
         loss_dict.update({
             "uncertainty_loss": uncertainty_loss * 1e5
         })
-        print("uncertainty_loss: ", uncertainty_loss)
+        # print("uncertainty_loss: ", uncertainty_loss)
         if image_infos['is_pseudo']:
             raise Exception("Not Implemented")
         return loss_dict

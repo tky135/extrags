@@ -413,6 +413,21 @@ class RigidNodes(VanillaGaussians):
         else:
             rgbs = torch.sigmoid(colors[:, 0, :])
 
+        # import ipdb ; ipdb.set_trace()
+        # ins_ids = 0
+        # while True:
+        #     mask = self.point_ids[..., 0] == ins_ids
+        #     local_world_means = world_means[mask].detach().cpu().numpy()
+        #     local_rgbs = rgbs[mask].detach().cpu().numpy()
+        #     import open3d as o3d
+        #     pcd = o3d.geometry.PointCloud()
+        #     pcd.points = o3d.utility.Vector3dVector(local_world_means)
+        #     pcd.colors = o3d.utility.Vector3dVector(local_rgbs)
+        #     # write 
+        #     o3d.io.write_point_cloud(f"local_{ins_ids}.pcd", pcd)
+        #     ins_ids += 1
+
+            
         # get view-dependent uncertainty
         if is_uncertainty:
             actovated_colors = self.get_uncertainty(viewdirs, py=False).unsqueeze(-1)

@@ -244,7 +244,9 @@ def main(args):
     logger.info(
         f"Resuming training from {args.resume_from}, starting at step {trainer.step}"
     )
-    trainer.export_ply(output_path=os.path.join(cfg.log_dir, f"step_eval.ply"))
+    # trainer.models['Ground'].validate_mesh(radius_overwrite=10, gridsize_overwrite=0.03)
+    # import ipdb ; ipdb.set_trace()
+    # trainer.export_ply(output_path=os.path.join(cfg.log_dir, f"step_eval.ply"))
     
     # if export_neus_2dgs:
     #     print("exporting neus to 2dgs")

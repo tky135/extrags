@@ -62,6 +62,17 @@ class DeformableNodes(RigidNodes):
             world_means = self.transform_means(means)
         else:
             world_means = self.transform_means(self._means)
+
+        # import ipdb ; ipdb.set_trace()
+        # if 1:
+        #     import open3d as o3d
+        #     pcd = o3d.geometry.PointCloud()
+        #     # base_mean = self.transform_means(self._means)
+        #     pcd.points = o3d.utility.Vector3dVector(world_means.detach().cpu().numpy())
+        #     pcd.colors = o3d.utility.Vector3dVector(rgbs.detach().cpu().numpy())
+        #     # write
+        #     o3d.io.write_point_cloud("world_mean.pcd", pcd)
+            
         
         if delta_quat is not None:
             quats = self.get_quats + delta_quat

@@ -272,7 +272,7 @@ class CameraData(object):
         Since in some datasets, the ego car body is visible in the images,
         we need to load the ego car mask to mask out the ego car body.
         """
-        egocar_mask = os.path.join("data", "ego_masks", self.dataset_name, f"{self.cam_id}.png")
+        egocar_mask = os.path.join("/train-syncdata/kaiyuan.tan/extrags_data", "ego_masks", self.dataset_name, f"{self.cam_id}.png")
         if os.path.exists(egocar_mask):
             egocar_mask = Image.open(egocar_mask).convert("L")
             # resize them to the load_size

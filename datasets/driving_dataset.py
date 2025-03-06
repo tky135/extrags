@@ -717,7 +717,7 @@ class DrivingDataset(SceneDataset):
             #     f"Test timesteps: \n{np.arange(self.start_timestep, self.end_timestep)[test_timesteps]}"
             # )
 
-        keyframe_timesteps = self.pixel_source.keyframe_timesteps
+        keyframe_timesteps = []
 
         # propagate the train and test timesteps to the train and test indices
         train_indices, test_indices = [], []
@@ -730,11 +730,11 @@ class DrivingDataset(SceneDataset):
             elif t in test_timesteps:
                 for cam in range(cam_num):
                     test_indices.append(t * cam_num + cam)
-            if t in keyframe_timesteps:
+            if self.pixel_source.get_image(t * cam_num)[0]['is_key_frame']:
                 for cam in range(cam_num):
                     keyframe_indices.append(t * cam_num + cam)
+                    keyframe_timesteps.append(t)
                 
-
         
         logger.info(f"Number of train indices: {len(train_indices)}")
         logger.info(f"Train indices: {train_indices}")

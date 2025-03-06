@@ -63,7 +63,7 @@ class MultiTrainer(BasicTrainer):
 
 
         # points, colors = self.models['Ground'].validate_mesh(output=output)
-        points, colors = self.models['Ground'].validate_mesh(radius_overwrite=10, gridsize_overwrite=0.05)
+        points, colors = self.models['Ground'].validate_mesh(radius_overwrite=10, gridsize_overwrite=0.03)
         points_coarse, colors_coarse = self.models['Ground'].validate_mesh(radius_overwrite=40, gridsize_overwrite=0.2)
         
         points = np.concatenate([points_coarse, points], axis=0)
@@ -473,6 +473,8 @@ class MultiTrainer(BasicTrainer):
         if 'CamPose_ts_neus' in self.models.keys():
             c2w_neus = self.models['CamPose_ts_neus'](c2w_neus, image_infos['normed_time'].flatten()[0])
         camera_infos['camera_to_world'] = c2w_neus
+        camera_infos['2dgs_cam'] = c2w_neus
+        camera_infos['3dgs_cam'] = processed_cam.camtoworlds
         
         outputs = {}
 
@@ -492,11 +494,14 @@ class MultiTrainer(BasicTrainer):
                 )
             image_infos['is_train'] = self.training
         
+        
         if 'Ground_gs' in self.models.keys() and self.ground_method == 'rsg':
+            processed_cam.camtoworlds = camera_infos['2dgs_cam']
             gs_ground, align_error = self.collect_gaussians(
                 cam=processed_cam,
                 image_ids=None,
-                is_ground=True
+                is_ground=True,
+                is_diffusion_step=is_diffusion_step
             )
             
             # 只用路面部分训练，保持和neus一致
@@ -526,7 +531,7 @@ class MultiTrainer(BasicTrainer):
         
         
         # detach processed_cam for uncertainty
-        processed_cam.camtoworlds = processed_cam.camtoworlds.detach()
+        processed_cam.camtoworlds = camera_infos['3dgs_cam']
         gs_uncert = self.collect_gaussians(
             cam=processed_cam,
             image_ids=None,
@@ -668,7 +673,7 @@ class MultiTrainer(BasicTrainer):
                 outputs["Dynamic_opacity"] = sep_opacity
                 outputs["Dynamic_depth"] = sep_depth
         # if ((self.step % 100 == 1) and self.training):# or is_diffusion_step:
-        if ((self.step % 100 == 1) and self.training) or (is_diffusion_step and self.step % 100 == 0):
+        if ((self.step % 500 == 1) and self.training) or (is_diffusion_step and self.step % 500 == 0):
             with torch.no_grad():
                 write_rgb = outputs['rgb'].detach().cpu() * 255
                 

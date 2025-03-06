@@ -282,24 +282,24 @@ def main(args):
     
     # define render keys
     render_keys = [
-        "gt_rgbs",
+        # "gt_rgbs",
         "rgbs",
-        "Background_rgbs",
-        "Dynamic_rgbs",
-        "RigidNodes_rgbs",
-        "DeformableNodes_rgbs",
-        "SMPLNodes_rgbs",
-        "depths",
-        "Background_depths",
-        "Dynamic_depths",
-        "RigidNodes_depths",
-        "DeformableNodes_depths",
-        "SMPLNodes_depths",
-        "mask",
-        "lidar_on_images",
-        "rgb_sky_blend",
-        "rgb_sky",
-        "rgb_error_maps",
+        # "Background_rgbs",
+        # "Dynamic_rgbs",
+        # "RigidNodes_rgbs",
+        # "DeformableNodes_rgbs",
+        # "SMPLNodes_rgbs",
+        # "depths",
+        # "Background_depths",
+        # "Dynamic_depths",
+        # "RigidNodes_depths",
+        # "DeformableNodes_depths",
+        # "SMPLNodes_depths",
+        # "mask",
+        # "lidar_on_images",
+        # "rgb_sky_blend",
+        # "rgb_sky",
+        # "rgb_error_maps",
     ]
     # setup optimizer  
     trainer.initialize_optimizer()
@@ -359,16 +359,15 @@ def main(args):
 
 
     # do a evaluation first
-    # do_evaluation(
-    #     step=30000,
-    #     cfg=cfg,
-    #     trainer=trainer,
-    #     dataset=dataset,
-    #     render_keys=['rgbs', 'gt_rgbs', 'lidar_on_images'],
-    #     args=args,
-    #     shift_x=max(shift_x_l)
-    # )
-
+    do_evaluation(
+        step=30000,
+        cfg=cfg,
+        trainer=trainer,
+        dataset=dataset,
+        render_keys=['rgbs'],
+        args=args,
+        shift_x=max(shift_x_l)
+    )
     sample2shift_vec = dict()
     for step in metric_logger.log_every(all_iters, cfg.logging.print_freq):
 
@@ -520,11 +519,11 @@ def main(args):
             
             # forward & backward
             outputs = trainer(image_infos, cam_infos)
-            if step % 100 == 0:
-                save_rgb = outputs['rgb'].permute(2, 0, 1).detach().cpu() * 255
-                save_rgb = save_rgb.type(torch.uint8)
-                _cam_name = cam_infos['cam_name'][0]
-                torchvision.io.write_png(save_rgb, os.path.join(trainer.mgd.get_prefix(), f'rgb_{_cam_name}_{step}.png'))
+            # if step % 100 == 0:
+            #     save_rgb = outputs['rgb'].permute(2, 0, 1).detach().cpu() * 255
+            #     save_rgb = save_rgb.type(torch.uint8)
+            #     _cam_name = cam_infos['cam_name'][0]
+            #     torchvision.io.write_png(save_rgb, os.path.join(trainer.mgd.get_prefix(), f'rgb_{_cam_name}_{step}.png'))
             trainer.update_visibility_filter()
 
             loss_dict.update(trainer.compute_losses(
@@ -824,10 +823,10 @@ def main(args):
             frame_idx = diff_image_infos['frame_idx'].flatten()[0].item()
             if rint == 0:
                 with torch.no_grad():
-                    blended_img = image_6_views_ts * inpainting_mask_6_views_ts.unsqueeze(0) + (1 - inpainting_mask_6_views_ts.unsqueeze(0)) * torch.tensor([-1, 1, -1], device=image_6_views_ts.device).view(1, 1, 3, 1, 1)
-                    trainer.mgd.save_image0_from_pixels(blended_img, f'blended_{frame_idx}_{step}_{random_camera}.png')
+                    # blended_img = image_6_views_ts * inpainting_mask_6_views_ts.unsqueeze(0) + (1 - inpainting_mask_6_views_ts.unsqueeze(0)) * torch.tensor([-1, 1, -1], device=image_6_views_ts.device).view(1, 1, 3, 1, 1)
+                    # trainer.mgd.save_image0_from_pixels(blended_img, f'blended_{frame_idx}_{step}_{random_camera}.png')
                     trainer.mgd.save_image0_from_pixels(image_6_views_ts, f'image_views_{frame_idx}_{step}_{random_camera}.png')
-                    trainer.mgd.save_image0_from_pixels((inpainting_mask_6_views_ts.unsqueeze(0) - 0.5) * 2.0, f'inpainting_mask_{frame_idx}_{step}_{random_camera}.png')
+                    # trainer.mgd.save_image0_from_pixels((inpainting_mask_6_views_ts.unsqueeze(0) - 0.5) * 2.0, f'inpainting_mask_{frame_idx}_{step}_{random_camera}.png')
             
 
             inpainting_mask_6_views_ts_ss = inpainting_mask_6_views_ts.reshape(image_6_views_ts.shape)

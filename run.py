@@ -39,14 +39,12 @@ class GlobalCounter:
 # generate folder
 counter = GlobalCounter()
 exp_name=sys.argv[1]
-try:
-    compare_with=int(sys.argv[2])
-except:
-    compare_with=None
+scene_idx=sys.argv[2]
+start_idx=sys.argv[3]
+end_idx=sys.argv[4]
+shift_x=sys.argv[5]
 
 exp_dir = f"experiments/{counter.increment():04d}_{exp_name}"
-if compare_with is not None:
-    exp_dir += f"_vs_{compare_with:04d}"
 os.makedirs(exp_dir)
 
 # copy code
@@ -62,6 +60,5 @@ for ln in ln_l:
     os.symlink(f"../../{ln}", f"{exp_dir}/{ln}")
 
 # tmp submit job
-for scene_idx in [605, 40, 516]:
-    command = f"/home/kaiyuan.tan/tmp submit job --group=ddld --machine_type=4090 --node=1 --gpu=1 --cpu=25 --memory=100 --docker_image artifactory.momenta.works/docker-momenta/hdmap-algorithm/worker-cvg:v0.0.9 --priority={PRIORITY} --work_dir={os.path.abspath(exp_dir)} --command='bash {TMP_SCRIPT} {exp_name} {scene_idx}'"
-    os.system(command)
+command = f"/home/kaiyuan.tan/tmp submit job --group=ddld --machine_type=4090 --node=1 --gpu=1 --cpu=25 --memory=100 --docker_image artifactory.momenta.works/docker-momenta/hdmap-algorithm/worker-cvg:v0.0.9 --priority={PRIORITY} --work_dir={os.path.abspath(exp_dir)} --command='bash {TMP_SCRIPT} {exp_name} {scene_idx} {start_idx} {end_idx} {shift_x}'"
+os.system(command)

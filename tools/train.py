@@ -359,15 +359,15 @@ def main(args):
 
 
     # do a evaluation first
-    do_evaluation(
-        step=30000,
-        cfg=cfg,
-        trainer=trainer,
-        dataset=dataset,
-        render_keys=['rgbs'],
-        args=args,
-        shift_x=max(shift_x_l)
-    )
+    # do_evaluation(
+    #     step=30000,
+    #     cfg=cfg,
+    #     trainer=trainer,
+    #     dataset=dataset,
+    #     render_keys=['rgbs'],
+    #     args=args,
+    #     shift_x=max(shift_x_l)
+    # )
     sample2shift_vec = dict()
     for step in metric_logger.log_every(all_iters, cfg.logging.print_freq):
 

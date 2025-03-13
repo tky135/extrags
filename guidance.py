@@ -853,6 +853,7 @@ class MagicDrive:
 
         # move to device
         batch = move_to(info, self.device)
+        inpainting_mask = inpainting_mask.to(self.device)
 
         # visualize bev segmentation map
         # visualize_class_map(batch['bev_map_with_aux'][0], "segmentation.png")
@@ -928,13 +929,13 @@ class MagicDrive:
 
                 # add noise at timestep t
                 noise = torch.randn_like(sds_img_vae_batched)
-                noisy_latents = self._add_noise(sds_img_vae_batched, noise, torch.tensor(timestep).unsqueeze(0).cuda())
+                noisy_latents = self._add_noise(sds_img_vae_batched, noise, torch.tensor(timestep).unsqueeze(0).to(self.device))
 
 
                 # predict noise residual epsilon
                 self.controlnet_unet.controlnet.drop_cond_ratio = 0.0
                 model_pred = self.controlnet_unet(
-                    noisy_latents, torch.tensor(timestep).unsqueeze(0).cuda().repeat(batch_size), camera_param_batched, encoder_hidden_states_batched, encoder_hidden_states_uncond,
+                    noisy_latents, torch.tensor(timestep).unsqueeze(0).to(self.device).repeat(batch_size), camera_param_batched, encoder_hidden_states_batched, encoder_hidden_states_uncond,
                     controlnet_image_batched,
                     bboxes_3d_data=bboxes_3d_data_batched,
                 )
@@ -943,7 +944,7 @@ class MagicDrive:
 
                 self.controlnet_unet.controlnet.drop_cond_ratio = 1.0
                 model_pred_uncod = self.controlnet_unet(
-                    noisy_latents, torch.tensor(timestep).unsqueeze(0).cuda().repeat(batch_size), camera_param_batched, encoder_hidden_states_batched, encoder_hidden_states_uncond,
+                    noisy_latents, torch.tensor(timestep).unsqueeze(0).to(self.device).repeat(batch_size), camera_param_batched, encoder_hidden_states_batched, encoder_hidden_states_uncond,
                     controlnet_image_batched,
                     bboxes_3d_data=bboxes_3d_data_batched,
                 )
@@ -953,7 +954,7 @@ class MagicDrive:
 
                 
                 # method 0: direct mse with denoised latent
-                target_latent = self._remove_noise(noisy_latents, model_pred, torch.tensor(timestep).unsqueeze(0).cuda().repeat(batch_size)).half()
+                target_latent = self._remove_noise(noisy_latents, model_pred, torch.tensor(timestep).unsqueeze(0).to(self.device).repeat(batch_size)).half()
                 target_latent = target_latent.mean(dim=0, keepdim=True)
                 
                 # method 1: from SDS pseudo code
@@ -1000,7 +1001,7 @@ class MagicDrive:
         elif method == 'direct':
             with torch.no_grad():
                 noise = torch.randn_like(sds_img_vae)
-                noisy_latents = self._add_noise(sds_img_vae, noise, torch.tensor(timestep).unsqueeze(0).cuda())
+                noisy_latents = self._add_noise(sds_img_vae, noise, torch.tensor(timestep).unsqueeze(0).to(self.device))
                 # denoising loop
                 step_ratio = timestep // 50
                 timesteps = (np.arange(0, 50) * step_ratio).round()[::-1].copy().astype(np.int64)
@@ -1008,13 +1009,13 @@ class MagicDrive:
                 for i in timesteps:
                     self.controlnet_unet.controlnet.drop_cond_ratio = 0.0
                     model_pred = self.controlnet_unet(
-                        noisy_latents, torch.tensor(i).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                        noisy_latents, torch.tensor(i).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                         encoder_hidden_states_uncond, controlnet_image,
                         **batch['kwargs'],
                     )
                     self.controlnet_unet.controlnet.drop_cond_ratio = 1.0
                     model_pred_uncod = self.controlnet_unet(
-                        noisy_latents, torch.tensor(i).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                        noisy_latents, torch.tensor(i).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                         encoder_hidden_states_uncond, controlnet_image,
                         **batch['kwargs'],
                     )
@@ -1040,18 +1041,18 @@ class MagicDrive:
         #         self.noise_scheduler.set_timesteps(timesteps=timesteps)
 
         #         noise = torch.randn_like(sds_img_vae)
-        #         noisy_latents = self._add_noise(sds_img_vae, noise, torch.tensor(timesteps[0]).unsqueeze(0).cuda())
+        #         noisy_latents = self._add_noise(sds_img_vae, noise, torch.tensor(timesteps[0]).unsqueeze(0).to(self.device))
         #         # denoising loop
         #         for i in timesteps:
         #             self.controlnet_unet.controlnet.drop_cond_ratio = 0.0
         #             model_pred = self.controlnet_unet(
-        #                 noisy_latents, torch.tensor(i).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+        #                 noisy_latents, torch.tensor(i).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
         #                 encoder_hidden_states_uncond, controlnet_image,
         #                 **batch['kwargs'],
         #             )
         #             self.controlnet_unet.controlnet.drop_cond_ratio = 1.0
         #             model_pred_uncod = self.controlnet_unet(
-        #                 noisy_latents, torch.tensor(i).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+        #                 noisy_latents, torch.tensor(i).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
         #                 encoder_hidden_states_uncond, controlnet_image,
         #                 **batch['kwargs'],
         #             )
@@ -1099,13 +1100,13 @@ class MagicDrive:
                         for r in range(resample):
                             self.controlnet_unet.controlnet.drop_cond_ratio = 0.0
                             model_pred = self.controlnet_unet(
-                                x_t, torch.tensor(t).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                                x_t, torch.tensor(t).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                                 encoder_hidden_states_uncond, controlnet_image,
                                 **batch['kwargs'],
                             )
                             self.controlnet_unet.controlnet.drop_cond_ratio = 1.0
                             model_pred_uncod = self.controlnet_unet(
-                                x_t, torch.tensor(t).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                                x_t, torch.tensor(t).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                                 encoder_hidden_states_uncond, controlnet_image,
                                 **batch['kwargs'],
                             )
@@ -1118,19 +1119,19 @@ class MagicDrive:
                             x_t_1 = output['prev_sample'].unsqueeze(0).half()
                             x0 = output['pred_original_sample'].unsqueeze(0).half().detach()
                             self.save_image0_from_latents(x0, f"noisy_latents_{t}_{r}.png")
-                            x_t = self._add_noise(x0, torch.randn_like(x0), torch.tensor(t).unsqueeze(0).cuda())
+                            x_t = self._add_noise(x0, torch.randn_like(x0), torch.tensor(t).unsqueeze(0).to(self.device))
                         
                         x_t = x_t_1
                     else:
                         self.controlnet_unet.controlnet.drop_cond_ratio = 0.0
                         model_pred = self.controlnet_unet(
-                            x_t, torch.tensor(t).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                            x_t, torch.tensor(t).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                             encoder_hidden_states_uncond, controlnet_image,
                             **batch['kwargs'],
                         )
                         self.controlnet_unet.controlnet.drop_cond_ratio = 1.0
                         model_pred_uncod = self.controlnet_unet(
-                            x_t, torch.tensor(t).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                            x_t, torch.tensor(t).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                             encoder_hidden_states_uncond, controlnet_image,
                             **batch['kwargs'],
                         )
@@ -1151,17 +1152,17 @@ class MagicDrive:
                 for i, t in enumerate(timesteps):
                     num_resample = 1 if i < 15 else 5
                     for r in range(num_resample):
-                        x_t_1_known = self._add_noise(sds_img_vae, torch.randn_like(sds_img_vae), torch.tensor(t).unsqueeze(0).cuda()) if i < len(timesteps) - 1 else sds_img_vae # mask sure the last step matches the known input exactly
+                        x_t_1_known = self._add_noise(sds_img_vae, torch.randn_like(sds_img_vae), torch.tensor(t).unsqueeze(0).to(self.device)) if i < len(timesteps) - 1 else sds_img_vae # mask sure the last step matches the known input exactly
                         # x_t_1_known = sds_img_vae
                         self.controlnet_unet.controlnet.drop_cond_ratio = 0.0
                         model_pred = self.controlnet_unet(
-                            x_t, torch.tensor(t).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                            x_t, torch.tensor(t).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                             encoder_hidden_states_uncond, controlnet_image,
                             **batch['kwargs'],
                         )
                         self.controlnet_unet.controlnet.drop_cond_ratio = 1.0
                         model_pred_uncod = self.controlnet_unet(
-                            x_t, torch.tensor(t).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                            x_t, torch.tensor(t).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                             encoder_hidden_states_uncond, controlnet_image,
                             **batch['kwargs'],
                         )
@@ -1191,7 +1192,7 @@ class MagicDrive:
                 self.noise_scheduler.set_timesteps(timesteps=timesteps)
 
                 noise = torch.randn_like(sds_img_vae)
-                x_t = self._add_noise(sds_img_vae, noise, torch.tensor(timesteps[0]).unsqueeze(0).cuda())
+                x_t = self._add_noise(sds_img_vae, noise, torch.tensor(timesteps[0]).unsqueeze(0).to(self.device))
 
                 if kwargs['inmask_g_scale'] == 0:
                     inmask_g_scale = np.zeros(len(timesteps))
@@ -1205,13 +1206,13 @@ class MagicDrive:
                     for r in range(resample):
                         self.controlnet_unet.controlnet.drop_cond_ratio = 0.0
                         model_pred = self.controlnet_unet(
-                            x_t, torch.tensor(t).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                            x_t, torch.tensor(t).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                             encoder_hidden_states_uncond, controlnet_image,
                             **batch['kwargs'],
                         )
                         self.controlnet_unet.controlnet.drop_cond_ratio = 1.0
                         model_pred_uncod = self.controlnet_unet(
-                            x_t, torch.tensor(t).unsqueeze(0).cuda(), camera_param, encoder_hidden_states,
+                            x_t, torch.tensor(t).unsqueeze(0).to(self.device), camera_param, encoder_hidden_states,
                             encoder_hidden_states_uncond, controlnet_image,
                             **batch['kwargs'],
                         )
@@ -1223,7 +1224,7 @@ class MagicDrive:
                         # self.save_image0_from_latents(x0, f"noisy_latents_{t}_{r}.png")
                         if t == 0 or r == resample - 1:
                             break
-                        # x_t = self._add_noise(x0, torch.randn_like(x0), torch.tensor(t).unsqueeze(0).cuda())
+                        # x_t = self._add_noise(x0, torch.randn_like(x0), torch.tensor(t).unsqueeze(0).to(self.device))
 
                         # problematic (less noise is added)
                         # beta_t_1 = self.noise_scheduler.betas[t - 1]
@@ -1632,12 +1633,12 @@ if __name__ == "__main__":
             mgd.get_loss(pred_rgb=save_dict['pred_rgb'], sample_token=save_dict['sample_token'], timestep=500, shift_x=save_dict['shift_x'], step=it, method='direct', inpainting_mask=torch.ones_like(save_dict['inpainting_mask']), scene_idx=0)
         elif method in ['sds', 'multistep', 'anneal', 'repaint', 'repaint2']:
             # sds
-            image_params = torch.nn.Parameter(save_dict['pred_rgb'].cuda(), requires_grad=True)
+            image_params = torch.nn.Parameter(save_dict['pred_rgb'].to(self.device), requires_grad=True)
             optimizer = torch.optim.Adam([image_params], lr=1e-2)
 
 
             for i in range(1, 201):
-                image_params_masked = image_params * save_dict['inpainting_mask'].cuda() + save_dict['pred_rgb'].cuda() * (1 - save_dict['inpainting_mask'].cuda())
+                image_params_masked = image_params * save_dict['inpainting_mask'].to(self.device) + save_dict['pred_rgb'].to(self.device) * (1 - save_dict['inpainting_mask'].to(self.device))
                 optimizer.zero_grad()
                 # t = sample_gaussian_around_t(50 * (1000 - i) // 1000, sigma=30) + 50
                 # t = (1000 - i)
@@ -1682,8 +1683,8 @@ if __name__ == "__main__":
                 # evaluation of target image
 
                 # with torch.no_grad():
-                #     target_image = ret_dict['unnorm_target_image'] * (1 - save_dict['inpainting_mask'].cuda())
-                #     input_image = image_params_masked * (1 - save_dict['inpainting_mask'].cuda())
+                #     target_image = ret_dict['unnorm_target_image'] * (1 - save_dict['inpainting_mask'].to(self.device))
+                #     input_image = image_params_masked * (1 - save_dict['inpainting_mask'].to(self.device))
                 #     consistency = F.l1_loss(target_image, input_image)
                 #     print(f"consistency loss: {consistency.item() * 10000}")
                 #     sds_scores = []

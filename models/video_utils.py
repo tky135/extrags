@@ -77,6 +77,11 @@ def render(
     lane_shift: bool = False,
     shift_x: float = 3.0
 ):
+    
+
+    if lane_shift:
+        trainer.models['Ground'].clear_rgb_cache()
+        trainer.models['Ground'].clear_z_cache()
     """
     Renders a dataset utilizing a specified render function.
 
@@ -87,6 +92,7 @@ def render(
         compute_error_map: Optional; if True, the function will compute and return error maps. Default is False.
         vis_indices: Optional; if not None, the function will only render the specified indices. Default is None.
     """
+    keys = ['rgbs', 'gt_rgbs', 'uncertainty']
     output_dict = {k: [] for k in keys}
     output_dict.update({'cam_names': []})
     if num_timestamps > 1:
@@ -109,9 +115,7 @@ def render(
     num_frames = 0
     
     
-    
     # dataset setup
-    
     indices = list(range(len(dataset.split_indices))) if vis_indices is None else vis_indices
     dataset.mode = "sequential"
     dataset.camera_downscale = camera_downscale
@@ -121,7 +125,10 @@ def render(
     for i in tqdm(indices, desc=f"rendering {dataset.split}", dynamic_ncols=True):
         image_infos, cam_infos = next(dataiter)
         if lane_shift:
-            cam_infos['camera_to_world'][0, 0, 3] -= shift_x
+            if dataset.datasource.dataset_name in ['waymo']:
+                cam_infos['camera_to_world'][0, 1, 3] -= shift_x
+            else:
+                cam_infos['camera_to_world'][0, 0, 3] -= shift_x
         if os.environ.get("DATASET") == 'kitti360/4cams' and cam_infos['cam_id'].flatten()[0].item() >= 1:
             continue
         for k, v in image_infos.items():
@@ -132,7 +139,7 @@ def render(
                 cam_infos[k] = v[0].cuda(non_blocking=True)
         # render the image
         results = trainer(image_infos, cam_infos)
-        
+
         # ------------- clip rgb ------------- #
         for k, v in results.items():
             if isinstance(v, Tensor) and "rgb" in k:
@@ -190,6 +197,11 @@ def render(
             output_dict['rgb_sky_blend'].append(get_numpy(results["rgb_sky_blend"]))
         if "rgb_sky" in results and 'rgb_sky' in keys:
             output_dict['rgb_sky'].append(get_numpy(results["rgb_sky"]))
+
+        # ------------- uncertainty ------------- #
+        if 'uncertainty' in keys:
+            uncertainty = (1 - results['uncertainty']['rgb_gaussians']).clip(0, 1)
+            output_dict['uncertainty'].append(get_numpy(uncertainty))
         # ------------- depth ------------- #
         if 'depths' in keys:
             depth = results['3dgs']["depth"]
@@ -323,7 +335,7 @@ def render(
                         continue
                     # handle special cases
                     cam_frames = output_dict[k]
-                    if "mask" in k:
+                    if "mask" in k or "uncertainty" in k:
                         cam_frames = [np.stack([frame, frame, frame], axis=-1) for frame in cam_frames]
                     elif "depth" in k:
                         cam_frames = [depth_visualizer(frame, None) for frame in cam_frames]
@@ -333,7 +345,7 @@ def render(
                     output_dict[k] = []
                     if save_images:
                         os.makedirs(save_path.replace(".mp4", f"_{k}"), exist_ok=True)
-                        sample_token = image_infos['sample_tokens'][0] if image_infos['is_key_frame'].item() is True else ''
+                        sample_token = image_infos['sample_tokens'][0] if ('is_key_frame' in image_infos and image_infos['is_key_frame'].item() is True) else ''
                         imageio.imwrite(
                             save_path.replace(".mp4", f"_{k}/{num_frames:03d}_{sample_token}_.png"),
                             frame,

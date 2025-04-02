@@ -730,11 +730,13 @@ class DrivingDataset(SceneDataset):
             elif t in test_timesteps:
                 for cam in range(cam_num):
                     test_indices.append(t * cam_num + cam)
-            if self.pixel_source.get_image(t * cam_num)[0]['is_key_frame']:
+            if 'is_key_frame' in self.pixel_source.get_image(t * cam_num)[0] and self.pixel_source.get_image(t * cam_num)[0]['is_key_frame']:
                 for cam in range(cam_num):
                     keyframe_indices.append(t * cam_num + cam)
                     keyframe_timesteps.append(t)
                 
+        keyframe_indices = train_indices
+        keyframe_timesteps = train_timesteps
         
         logger.info(f"Number of train indices: {len(train_indices)}")
         logger.info(f"Train indices: {train_indices}")

@@ -292,7 +292,8 @@ def main(args):
         dataset=dataset,
         render_keys=render_keys,
         args=args,
-        post_fix="_eval"
+        post_fix="_eval",
+        shift_x=float(os.environ.get("shift_x"))
     )
     
     if args.enable_viewer:

@@ -1,0 +1,9 @@
+{
+    "exclude": [
+        "data",
+        "experiments",          // 排除虚拟环境目录
+        "BEVFormer",      // 排除所有子目录下的 tests 文件夹
+        "MapTR"   // 排除前端依赖目录
+        "output",
+    ]
+}

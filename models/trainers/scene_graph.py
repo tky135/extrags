@@ -53,8 +53,8 @@ class MultiTrainer(BasicTrainer):
 
 
         # self.mgd = MagicDrive(sd_path="pretrained/stable-diffusion-v1-5", checkpoint_path="pretrained/large_mgd", version=self.version)
-        self.mgd = MagicDrive(sd_path="pretrained/stable-diffusion-v1-5", checkpoint_path="pretrained/SDv1.5mv-rawbox_2023-09-07_18-39_224x400", version=self.version)
-        self.mgd.prepare_data_pipeline()
+        # self.mgd = MagicDrive(sd_path="pretrained/stable-diffusion-v1-5", checkpoint_path="pretrained/SDv1.5mv-rawbox_2023-09-07_18-39_224x400", version=self.version)
+        # self.mgd.prepare_data_pipeline()
 
     def neus23dgs(self, output=False):
         if 'Ground' not in self.models.keys():
@@ -535,7 +535,8 @@ class MultiTrainer(BasicTrainer):
         gs_uncert = self.collect_gaussians(
             cam=processed_cam,
             image_ids=None,
-            is_uncertainty=True
+            is_uncertainty=True,
+            is_diffusion_step=is_diffusion_step
         )
 
         outputs_uncertainty, render_fn_uncertainty = self.render_gaussians(
@@ -673,7 +674,8 @@ class MultiTrainer(BasicTrainer):
                 outputs["Dynamic_opacity"] = sep_opacity
                 outputs["Dynamic_depth"] = sep_depth
         # if ((self.step % 100 == 1) and self.training):# or is_diffusion_step:
-        if ((self.step % 500 == 1) and self.training) or (is_diffusion_step and self.step % 500 == 0):
+        # if ((self.step % 500 == 1) and self.training) or (is_diffusion_step) or image_infos['img_idx'].flatten()[0].item() == 95:
+        if is_diffusion_step:
             with torch.no_grad():
                 write_rgb = outputs['rgb'].detach().cpu() * 255
                 

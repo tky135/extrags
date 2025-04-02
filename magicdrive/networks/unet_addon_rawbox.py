@@ -7,18 +7,18 @@ import torch.nn as nn
 import numpy as np
 from einops import repeat, rearrange
 
-from diffusers import UNet2DConditionModel
+# from diffusers import UNet2DConditionModel
 from diffusers.configuration_utils import register_to_config, ConfigMixin
 from diffusers.models.attention_processor import AttentionProcessor, AttnProcessor
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_utils import ModelMixin
-from diffusers.models.unet_2d_blocks import (
+from diffusers.models.unets.unet_2d_blocks import (
     CrossAttnDownBlock2D,
     DownBlock2D,
     UNetMidBlock2DCrossAttn,
     get_down_block,
 )
-from diffusers.models.unet_2d_condition import UNet2DConditionModel
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.models.controlnet import zero_module
 
 from .embedder import get_embedder

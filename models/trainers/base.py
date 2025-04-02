@@ -197,7 +197,7 @@ class BasicTrainer(nn.Module):
             component_name = params_name.split("#")[1]
             # if component_name in ['sh_rest', 'ins_rotation', 'ins_translation']:
             #     continue
-            if component_name != "uncertainty" and class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus']:
+            if component_name != "uncertainty":
             # if component_name != "uncertainty" and class_name in ['Ground', 'Affine', 'CamPose_ts', 'ExtrinsicPose', 'CamPose_ts_neus', 'ExtrinsicPose_neus', 'DeformableNodes', 'Background', 'Sky']:
                 continue
             
@@ -212,37 +212,40 @@ class BasicTrainer(nn.Module):
 
             optim_cfg = OmegaConf.create({
                 "lr": raw_optim_cfg.get('lr', 0.0005),
-                "eps": raw_optim_cfg.get('eps', 1.0e-15),
-                "weight_decay": raw_optim_cfg.get('weight_decay', 0),
+                # "eps": raw_optim_cfg.get('eps', 1.0e-15),
+                # "weight_decay": raw_optim_cfg.get('weight_decay', 0),
             })
             optim_cfg.lr = optim_cfg.lr * lr_scale_factor
             assert optim_cfg is not None, f"param group {params_name} not found in config"
-            lr_init = optim_cfg.lr
+            # lr_init = optim_cfg.lr
             groups_diffusion.append({
                 'params': params,
                 'name': params_name,
                 'lr': optim_cfg.lr,
-                'eps': optim_cfg.eps,
-                'weight_decay': optim_cfg.weight_decay
+                # 'eps': optim_cfg.eps,
+                # 'weight_decay': optim_cfg.weight_decay
             })
-            
-            if raw_optim_cfg.get("lr_final", None) is not None:
-                sched_cfg = OmegaConf.create({
-                    "opt_after": raw_optim_cfg.get('opt_after', 0),
-                    "warmup_steps": raw_optim_cfg.get('warmup_steps', 0),
-                    "max_steps": raw_optim_cfg.get('max_steps', self.num_iters),
-                    "lr_pre_warmup": raw_optim_cfg.get('lr_pre_warmup', 1.0e-8),
-                    "lr_final": raw_optim_cfg.get('lr_final', None),
-                    "ramp": raw_optim_cfg.get('ramp', "cosine"),
-                })
-                # scale the learning rate according to the scene scale
-                sched_cfg.lr_pre_warmup = sched_cfg.lr_pre_warmup * lr_scale_factor
-                sched_cfg.lr_final = sched_cfg.lr_final * lr_scale_factor if sched_cfg.lr_final is not None else None
-                # adjust max_steps to account for opt_after
-                sched_cfg.max_steps = sched_cfg.max_steps - sched_cfg.opt_after
-                lr_schedulers_diffusion[params_name] = lr_scheduler_fn(sched_cfg, lr_init)
 
-        self.optimizer_diffusion = torch.optim.Adam(groups_diffusion, lr=0.0, eps=1e-15)
+            
+
+            # if raw_optim_cfg.get("lr_final", None) is not None:
+            #     sched_cfg = OmegaConf.create({
+            #         "opt_after": raw_optim_cfg.get('opt_after', 0),
+            #         "warmup_steps": raw_optim_cfg.get('warmup_steps', 0),
+            #         "max_steps": raw_optim_cfg.get('max_steps', self.num_iters),
+            #         "lr_pre_warmup": raw_optim_cfg.get('lr_pre_warmup', 1.0e-8),
+            #         "lr_final": raw_optim_cfg.get('lr_final', None),
+            #         "ramp": raw_optim_cfg.get('ramp', "cosine"),
+            #     })
+            #     # scale the learning rate according to the scene scale
+            #     sched_cfg.lr_pre_warmup = sched_cfg.lr_pre_warmup * lr_scale_factor
+            #     sched_cfg.lr_final = sched_cfg.lr_final * lr_scale_factor if sched_cfg.lr_final is not None else None
+            #     # adjust max_steps to account for opt_after
+            #     sched_cfg.max_steps = sched_cfg.max_steps - sched_cfg.opt_after
+            #     lr_schedulers_diffusion[params_name] = lr_scheduler_fn(sched_cfg, lr_init)
+
+        # self.optimizer_diffusion = torch.optim.Adam(groups_diffusion, lr=0.0, eps=1e-15)
+        self.optimizer_diffusion = torch.optim.SGD(groups_diffusion, lr=0.0)
         self.lr_schedulers_diffusion = lr_schedulers_diffusion
 
 
@@ -432,10 +435,11 @@ class BasicTrainer(nn.Module):
         radii = self.info["radii"]
         alphas = self.info["opacities"]
         
-        if self.render_cfg.absgrad:
-            grads = self.info["means2d"].absgrad.clone()
-        else:
-            grads = self.info["means2d"].grad.clone()
+        # if self.render_cfg.absgrad:
+        #     grads = self.info["means2d"].absgrad.clone()
+        # else:
+        #     grads = self.info["means2d"].grad.clone()
+        grads = torch.zeros_like(self.info['means2d'])
         grads[..., 0] *= self.info["width"] / 2.0 * self.render_cfg.batch_size
         grads[..., 1] *= self.info["height"] / 2.0 * self.render_cfg.batch_size
         
@@ -452,9 +456,9 @@ class BasicTrainer(nn.Module):
 
         
         # 更新underground
-        if step % self.gaussian_ctrl_general_cfg.refine_interval == 0:
-            # update underground mask
-            self.update_underground_mask()
+        # if step % self.gaussian_ctrl_general_cfg.refine_interval == 0:
+        #     # update underground mask
+        #     self.update_underground_mask()
             
         # gaussians postprocess
         for class_name in self.gaussian_classes.keys():
@@ -573,7 +577,10 @@ class BasicTrainer(nn.Module):
             if k == 'align_error':
                 gs_dict[k] = v[0]
             else:
-                gs_dict[k] = torch.cat(v, dim=0)
+                try:
+                    gs_dict[k] = torch.cat(v, dim=0)
+                except:
+                    import ipdb ; ipdb.set_trace()
             
         # get the class labels
         self.pts_labels = gs_dict.pop("class_labels")
@@ -616,7 +623,7 @@ class BasicTrainer(nn.Module):
                         Ks=cam.Ks[None, ...],  # [C, 3, 3]
                         width=cam.W,
                         height=cam.H,
-                        backgrounds=torch.ones((1, 1)).to(self.device), # [C, D]
+                        backgrounds=torch.ones((1, gs.rgbs.shape[-1])).to(self.device), # [C, D]
                         packed=self.render_cfg.packed,
                         absgrad=self.render_cfg.absgrad,
                         sparse_grad=self.render_cfg.sparse_grad,
@@ -651,7 +658,7 @@ class BasicTrainer(nn.Module):
                     rendered_depth = None
 
                 output = {
-                    'rgb_gaussians': torch.clamp(rendered_rgb, max=1.0),
+                    'rgb_gaussians': rendered_rgb,
                     'depth': rendered_depth,
                     'opacity': alphas[..., None]
                 }
@@ -711,7 +718,7 @@ class BasicTrainer(nn.Module):
             if results['rgb_gaussians'].shape[-1] == 3:
                 self.info = info
                 is_uncert = False
-            elif results['rgb_gaussians'].shape[-1] == 1:
+            elif results['rgb_gaussians'].shape[-1] in  [1, 2]:
                 self.uncert_info = info
                 is_uncert = True
             else:
@@ -723,7 +730,8 @@ class BasicTrainer(nn.Module):
             else:
                 raise Exception
         if self.training and is_ground:
-            self.ground_info["means2d"].retain_grad()
+            if self.ground_info["means2d"].requires_grad is True:
+                self.ground_info["means2d"].retain_grad()
         elif self.training and not is_uncert:
             self.info['means2d'].retain_grad()
         
@@ -811,13 +819,16 @@ class BasicTrainer(nn.Module):
         if len(loss_dict) == 0:
             return
         total_loss = sum(loss for loss in loss_dict.values())
-        self.grad_scaler.scale(total_loss).backward()
+
+        if total_loss.requires_grad:
+            self.grad_scaler.scale(total_loss).backward()
+        
 
         # if self.models['Background']._uncertainty.grad is not None:
         #     print("uncertainty mean grad", self.models['Background']._uncertainty.grad.abs().mean())
         #     print("rgb mean grad", self.models['Background']._features_dc.grad.abs().mean())
             
-        self.optimizer_step(is_diffusion_step=is_diffusion_step)
+            self.optimizer_step(is_diffusion_step=is_diffusion_step)
         
         scale = self.grad_scaler.get_scale()
         self.grad_scaler.update()
@@ -846,10 +857,10 @@ class BasicTrainer(nn.Module):
         if 'is_pseudo' not in image_infos:
             image_infos['is_pseudo'] = False
         loss_dict = {}
-        if 'Ground' in self.models and self.ground_method == 'neus':
-            ground_loss = self.models['Ground'].get_loss(outputs['ground'], image_infos, cam_infos)
-            loss_dict.update(ground_loss)
-        if True:
+        # if 'Ground' in self.models and self.ground_method == 'neus':
+        #     ground_loss = self.models['Ground'].get_loss(outputs['ground'], image_infos, cam_infos)
+            # loss_dict.update(ground_loss)
+        if False:
             if "egocar_masks" in image_infos:
                 # in the case of egocar, we need to mask out the egocar region
                 valid_loss_mask = (1.0 - image_infos["egocar_masks"]).float()# * (1.0 - image_infos["road_masks"]).float()
@@ -985,44 +996,45 @@ class BasicTrainer(nn.Module):
                 class_reg_loss = self.models[class_name].compute_reg_loss()
                 for k, v in class_reg_loss.items():
                     loss_dict[f"{class_name}_{k}"] = v
-        if 'ground_gs' in outputs:
-            if self.losses_dict.get("normal_consistency", None) is not None:
-                # normal consistency loss
-                depth_normal = outputs['ground_gs']['normal_from_depth'] * outputs['ground_gs']['opacity'].detach() * image_infos['road_masks'].unsqueeze(-1)
-                depth_normal = depth_normal.permute(2, 0, 1)
-                normal = outputs['ground_gs']['normal'] * image_infos['road_masks'].unsqueeze(-1)
-                normal = normal.permute(2, 0, 1)
+        # if 'ground_gs' in outputs:
+        #     if self.losses_dict.get("normal_consistency", None) is not None:
+        #         # normal consistency loss
+        #         depth_normal = outputs['ground_gs']['normal_from_depth'] * outputs['ground_gs']['opacity'].detach() * image_infos['road_masks'].unsqueeze(-1)
+        #         depth_normal = depth_normal.permute(2, 0, 1)
+        #         normal = outputs['ground_gs']['normal'] * image_infos['road_masks'].unsqueeze(-1)
+        #         normal = normal.permute(2, 0, 1)
                 
-                # 最外面一圈depth normal是[0, 0 ,0]，但是不影响normal
-                normal_error = (1 - (normal * depth_normal).sum(dim=0))[None]
-                loss_dict.update({
-                    "normal_consistency_loss": self.losses_dict.normal_consistency.w * normal_error.mean()
-                })
+        #         # 最外面一圈depth normal是[0, 0 ,0]，但是不影响normal
+        #         normal_error = (1 - (normal * depth_normal).sum(dim=0))[None]
+        #         loss_dict.update({
+        #             "normal_consistency_loss": self.losses_dict.normal_consistency.w * normal_error.mean()
+        #         })
             
-            if self.losses_dict.get("distortion", None) is not None:
-                # distortion loss
-                dist = outputs['ground_gs']['render_distort'] * image_infos['road_masks'].unsqueeze(-1)
-                dist = dist.permute(2, 0, 1)
-                dist_loss = dist.mean()
-                loss_dict.update({
-                    "distortion_loss": self.losses_dict.distortion.w * dist_loss
-                })
+        #     if self.losses_dict.get("distortion", None) is not None:
+        #         # distortion loss
+        #         dist = outputs['ground_gs']['render_distort'] * image_infos['road_masks'].unsqueeze(-1)
+        #         dist = dist.permute(2, 0, 1)
+        #         dist_loss = dist.mean()
+        #         loss_dict.update({
+        #             "distortion_loss": self.losses_dict.distortion.w * dist_loss
+        #         })
             
-            if self.losses_dict.get("align_error", None) is not None:
-                # align error
-                align_error = outputs['ground_gs']['align_error']
-                # print(align_error)
-                loss_dict.update({
-                    "align_error": align_error * self.losses_dict.align_error.w
-                })
+        #     if self.losses_dict.get("align_error", None) is not None:
+        #         # align error
+        #         align_error = outputs['ground_gs']['align_error']
+        #         # print(align_error)
+        #         loss_dict.update({
+        #             "align_error": align_error * self.losses_dict.align_error.w
+        #         })
 
         # update uncertainty
         # uncertainty_loss = torch.nn.functional.mse_loss(outputs['uncertainty']['rgb_gaussians'].clip(0, 1), outputs['uncertainty']['opacity'].detach(), reduction='mean') * 1e5
-        uncertainty_loss = - outputs['uncertainty']['rgb_gaussians'].log().mean()
+        uncertainty_loss =  - outputs['uncertainty']['rgb_gaussians'].mean()
         loss_dict.update({
             "uncertainty_loss": uncertainty_loss * 1e5
         })
         # print("uncertainty_loss: ", uncertainty_loss)
+        print(loss_dict)
         if image_infos['is_pseudo']:
             raise Exception("Not Implemented")
         return loss_dict

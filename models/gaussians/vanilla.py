@@ -137,7 +137,25 @@ def compound_rotation(vector):
     step1 = rotate_3d_vector(vector, 35.26, 'y')
     # 绕X轴旋转-45度
     return rotate_3d_vector(step1, -45, 'x')
+def compute_closest_cosine_similarity(input_dirs, target_dirs):
+    """
+    Compute the cosine similarity with the closest target direction for each input direction.
 
+    Args:
+        input_dirs (torch.Tensor): Tensor of shape [N, 3] representing N input directions.
+        target_dirs (torch.Tensor): Tensor of shape [M, N, 3] representing M target directions for each input.
+
+    Returns:
+        torch.Tensor: Tensor of shape [N] containing the maximum cosine similarity for each input direction.
+    """
+    # Expand input to [1, N, 3] to broadcast against targets [M, N, 3]
+    input_expanded = input_dirs.unsqueeze(0)
+    # Compute cosine similarity across the last dimension (3D vectors)
+    # Resulting shape is [M, N]
+    cos_sims = F.cosine_similarity(input_expanded, target_dirs, dim=-1)
+    # Take the maximum over the M dimension to get [N]
+    max_cos_sims, _ = torch.max(cos_sims, dim=0)
+    return max_cos_sims
 def quaternion_rotate(quaternions, directions):
     """
     Rotate 3D directions by corresponding quaternions in batch.
@@ -236,35 +254,216 @@ class VanillaGaussians(nn.Module):
         self.uncertainty_degree = 4
         self.uncertainty_num_coeffs = (self.uncertainty_degree + 1) ** 2
         # self.uncertainty_coeffs = nn.Parameter(torch.randn(self.uncertainty_num_coeffs)).to(self.device)
-        self._uncertainty = torch.zeros(1, self.uncertainty_num_coeffs, 1, device=self.device)
+        self._uncertainty = torch.zeros(1, self.uncertainty_num_coeffs, 2, device=self.device)
+        self._training_dir = torch.zeros(1, 3, device=self.device)
+        self._training_temp_dir = None
+
+        self.plot_uncertainty_l = []
+        self.plot_count_l = []
+
+
+        # self._uncertainty = 
+
+
+        # 0324 memorization
+        self.trainview_dict = {}
+        self._training_record = []
+
 
         self.alpha_cum = None
         self.alpha_cnt = 0
 
-    def get_uncertainty(self, directions, py=False):
-        directions_clone = F.normalize(directions, p=2, dim=-1).detach().clone()
 
-        # self.dirx_record += directions[:, 0].abs().mean()
-        # self.diry_record += directions[:, 1].abs().mean()
-        # self.dirz_record += directions[:, 2].abs().mean()
-        # self.dir_cum += 1
-        # print(f"{self.class_prefix}: dirx: {self.dirx_record / self.dir_cum}, diry: {self.diry_record / self.dir_cum}, dirz: {self.dirz_record / self.dir_cum}")
-        # directions = directions[:, [0, 2, 1]]
+        self.last_epoch_cum = None
 
-        normalized_coeffs = self._uncertainty / (torch.norm(self._uncertainty, dim=(1, 2), keepdim=True).detach() + 1e-10)
+        self.method = "sh+count_learned"
+    def get_uncertainty(self, directions, py=False, is_diffusion_step=False):
+        method = self.method
+        if method == 'sh':
+            directions_clone = F.normalize(directions, p=2, dim=-1).detach().clone()
 
-        coeffs = normalized_coeffs.repeat(1, 1, 3)
-        f = spherical_harmonics(self.uncertainty_degree, directions_clone, coeffs)[:, 0]
-        pdf_unnorm = f ** 2
-        # norm = torch.sum(self._uncertainty ** 2, dim=(1, 2))
-        # pdf = pdf_unnorm / (norm + 1e-10)
-        if self.alpha_cum is not None:
-            pdf = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 9
-            # pdf = 1 - torch.exp(-pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 25)
-            # print(f"{self.class_prefix}, alpha_cum_avg: {self.alpha_cum.mean()}, alpha_cum_max: {self.alpha_cum.max()}, alpha_cum_min: {self.alpha_cum.min()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}, max: {pdf.max()}, min: {pdf.min()}, std: {pdf.std()}")
-        else:
-            pdf = pdf_unnorm
-            # print(f"{self.class_prefix}, pdf: {pdf.mean()}, pdf_max: {pdf.max()}, pdf_min: {pdf.min()}, pdf_std: {pdf.std()}")
+            # directions_clone = compound_rotation(directions_clone)
+
+
+            # directions_clone = quaternion_rotate(self.get_quats.detach(), directions_clone)
+
+            # self.dirx_record += directions[:, 0].abs().mean()
+            # self.diry_record += directions[:, 1].abs().mean()
+            # self.dirz_record += directions[:, 2].abs().mean()
+            # self.dir_cum += 1
+            # print(f"{self.class_prefix}: dirx: {self.dirx_record / self.dir_cum}, diry: {self.diry_record / self.dir_cum}, dirz: {self.dirz_record / self.dir_cum}")
+            # directions = directions[:, [0, 2, 1]]
+
+            normalized_coeffs = self._uncertainty / (torch.norm(self._uncertainty, dim=(1, 2), keepdim=True).detach() + 1e-10)
+
+            coeffs = normalized_coeffs.repeat(1, 1, 3)
+            f = spherical_harmonics(self.uncertainty_degree, directions_clone, coeffs)[:, 0]
+            pdf_unnorm = f ** 2
+            # norm = torch.sum(self._uncertainty ** 2, dim=(1, 2))
+            # pdf = pdf_unnorm / (norm + 1e-10)
+            if self.alpha_cum is not None:
+                pdf = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 4
+                # pdf = 1 - torch.exp(-pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 25)
+                print(f"{self.class_prefix}, alpha_cum_avg: {self.alpha_cum.mean()}, alpha_cum_max: {self.alpha_cum.max()}, alpha_cum_min: {self.alpha_cum.min()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}, max: {pdf.max()}, min: {pdf.min()}, std: {pdf.std()}")
+            else:
+                pdf = pdf_unnorm
+                # print(f"{self.class_prefix}, pdf: {pdf.mean()}, pdf_max: {pdf.max()}, pdf_min: {pdf.min()}, pdf_std: {pdf.std()}")
+        elif method == 'single_train':
+
+            ### only single direction for each gaussian
+            directions_clone = F.normalize(directions, p=2, dim=-1).detach().clone()
+            training_directions = self._uncertainty[:, :3, 0] / (torch.norm(self._uncertainty[:, :3, 0], dim=-1, keepdim=True) + 1e-10)
+            # training_directions_z = torch.zeros_like(directions_clone)
+            # training_directions_z[:, 2] = 1
+            # training_directions_x = torch.zeros_like(directions_clone)
+            # training_directions_x[:, 0] = 1
+            # training_directions = torch.vstack([training_directions_z.unsqueeze(0), training_directions_x.unsqueeze(0)])
+            
+            # cosine_sim = (directions_clone * training_directions).sum(dim=-1).abs()
+            pdf = compute_closest_cosine_similarity(directions_clone, training_directions)
+            # print(training_directions.mean(dim=0))
+            # print(pdf.mean())
+        elif method == 'single':
+            ### single direction for each gaussian
+            directions_clone = F.normalize(directions, p=2, dim=-1).detach().clone()
+            self._training_temp_dir = directions_clone
+
+            training_directions = self._training_dir / (torch.norm(self._training_dir, dim=-1, keepdim=True) + 1e-10)
+
+            pdf = compute_closest_cosine_similarity(directions_clone, training_directions.unsqueeze(0)) 
+            return pdf.clip(0, 1), training_directions.abs()
+        elif method == 'single_multiply':
+            ### single direction for each gaussian multiply with average count
+            directions_clone = F.normalize(directions, p=2, dim=-1).detach().clone()
+            self._training_temp_dir = directions_clone
+
+            training_directions = self._training_dir / (torch.norm(self._training_dir, dim=-1, keepdim=True) + 1e-10)
+
+            pdf = compute_closest_cosine_similarity(directions_clone, training_directions.unsqueeze(0)) 
+            if self.alpha_cum is not None:
+                pdf *= (self.alpha_cum / self.alpha_cnt) * 9
+            return pdf._uncertaintyclip(0, 1), training_directions.abs()
+        elif method == "nearest":
+            ### nearest direction from train set(GT)
+            directions_clone = F.normalize(directions, p=2, dim=-1).detach().clone()
+
+            self._training_temp_dir = directions_clone
+
+            training_directions = self._training_dir / (torch.norm(self._training_dir, dim=-1, keepdim=True) + 1e-10)
+
+            if len(self._training_record) > 1 and "Rigid" in self.class_prefix:
+                training_directions = torch.cat(self._training_record)
+                pdf = compute_closest_cosine_similarity(directions_clone, training_directions)
+                return pdf.clip(0, 1) ** 4, training_directions[0].abs()
+            else:
+                pdf = compute_closest_cosine_similarity(directions_clone, training_directions.unsqueeze(0)) 
+                return torch.ones_like(pdf.clip(0, 1)), torch.zeros_like(training_directions.abs())
+        elif method == "count":
+            if self.alpha_cum is not None:
+                pdf = (self.alpha_cum / self.alpha_cnt) * 5
+            else:
+                pdf = torch.ones_like(directions[:, 0])
+        
+
+        elif method == "count_learned":
+            if self.alpha_cum is not None:
+                pdf = self._uncertainty[:, 0, 0]
+                self.plot_uncertainty_l.append((pdf / self.alpha_cnt).mean().detach().cpu().numpy())
+                if is_diffusion_step or self.training is False:
+                    pdf = pdf.detach() / self.alpha_cnt * 1e6
+                    print(
+                        f'testing: {pdf.min()}, {pdf.max()}, {pdf.mean()}'
+                    )
+                elif self.step % 100 == 0:
+                    
+
+                    if self.last_epoch_cum is None:
+                        self.last_epoch_cum = pdf.clone()
+                    else:
+                        if self.step - 40000 != self.alpha_cnt:
+                            import ipdb ; ipdb.set_trace()
+                        print(f"{self.class_prefix} {(pdf - self.last_epoch_cum).mean()}, {pdf.min()}, {pdf.max()}, {self.step}, {self.alpha_cnt}")
+                        self.last_epoch_cum = pdf.clone()
+                    # self.plot_count_l.append(self.alpha_cnt)
+                    import matplotlib.pyplot as plt
+                    plt.plot(self.plot_uncertainty_l, label="uncertainty")
+                    # plt.plot(self.plot_count_l, label="count")
+                    plt.legend()
+                    plt.savefig(f"plt_{self.class_prefix}_plot.png")
+                    plt.close()
+                # print(f"{self.class_prefix} {(self._uncertainty[:, 0, 0] / self.alpha_cnt).mean()} {self._uncertainty[:, 0, 0].mean()}, {self.alpha_cnt}")
+            else:
+                pdf = torch.ones_like(directions[:, 0])
+        
+
+        elif method == "sh+count_learned":
+
+
+
+            # p(x | y)
+            directions_clone = F.normalize(directions, p=2, dim=-1).detach().clone()
+
+
+            normalized_coeffs = (self._uncertainty[:, :, :1] + 1) / (torch.norm((self._uncertainty[:, :, :1] + 1), dim=(1, 2), keepdim=True).detach() + 1e-10)
+
+            coeffs = normalized_coeffs.repeat(1, 1, 3)
+            f = spherical_harmonics(self.uncertainty_degree, directions_clone, coeffs)[:, 0]
+            pdf_unnorm = f ** 2
+            # norm = torch.sum(self._uncertainty ** 2, dim=(1, 2))
+            # pdf = pdf_unnorm / (norm + 1e-10)
+            # if self.alpha_cum is not None:
+            #     pxy = pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 9
+            #     # pdf = 1 - torch.exp(-pdf_unnorm * (self.alpha_cum / self.alpha_cnt) * 25)
+            #     print(f"{self.class_prefix}, alpha_cum_avg: {self.alpha_cum.mean()}, alpha_cum_max: {self.alpha_cum.max()}, alpha_cum_min: {self.alpha_cum.min()}, alpha_cnt: {self.alpha_cnt}, pdf: {pdf.mean()}, max: {pdf.max()}, min: {pdf.min()}, std: {pdf.std()}")
+            # else:
+            #     pxy = pdf_unnorm
+            pxy = pdf_unnorm
+
+            # p(y)
+
+            if self.alpha_cum is not None:
+                py = self._uncertainty[:, 0, 1]
+                self.plot_uncertainty_l.append((py / self.alpha_cnt).mean().detach().cpu().numpy())
+                # if is_diffusion_step or self.training is False:
+                #     pdf = pdf.detach() / self.alpha_cnt * 1e6
+                #     print(
+                #         f'testing: {pdf.min()}, {pdf.max()}, {pdf.mean()}'
+                #     )
+                # elif self.step % 100 == 0:
+                if self.step % 100 == 0:
+
+                    if self.last_epoch_cum is None:
+                        self.last_epoch_cum = py.clone()
+                    else:
+                        # if self.step - 40000 != self.alpha_cnt:
+                        #     import ipdb ; ipdb.set_trace()
+                        print(f"{self.class_prefix} {(py - self.last_epoch_cum).mean()}, {py.min()}, {py.max()}, {self.step}, {self.alpha_cnt}")
+                        self.last_epoch_cum = py.clone()
+                    # self.plot_count_l.append(self.alpha_cnt)
+                    import matplotlib.pyplot as plt
+                    plt.plot(self.plot_uncertainty_l, label="uncertainty")
+                    # plt.plot(self.plot_count_l, label="count")
+                    plt.legend()
+                    plt.savefig(f"plt_{self.class_prefix}_plot.png")
+                    plt.close()
+                # print(f"{self.class_prefix} {(self._uncertainty[:, 0, 0] / self.alpha_cnt).mean()} {self._uncertainty[:, 0, 0].mean()}, {self.alpha_cnt}")
+            else:
+                py = torch.ones_like(directions[:, 0])
+
+
+            pdf = torch.cat([pxy.unsqueeze(-1), py.unsqueeze(-1)], dim=-1)
+
+
+            if is_diffusion_step or self.training is False:
+                pdf = py.detach() / self.alpha_cnt * 1e2 * pxy
+                print(f"{self.class_prefix}, pdf: {pdf.mean()}, py: {(py.detach() / self.alpha_cnt * 1e1).mean()}, pxy: {pxy.mean()}")
+
+
+            
+            
+
+
+
         return pdf
     
     @property
@@ -324,7 +523,7 @@ class VanillaGaussians(nn.Module):
             shs[:, 0, :3] = torch.logit(init_colors, eps=1e-10)
         self._features_dc = Parameter(shs[:, 0, :])
         self._features_rest = Parameter(shs[:, 1:, :])
-        self._uncertainty = Parameter(torch.randn(self.num_points, self.uncertainty_num_coeffs, 1, device=self.device))
+        self._uncertainty = Parameter(torch.zeros(self.num_points, self.uncertainty_num_coeffs, 2, device=self.device))
         self._opacities = Parameter(torch.logit(init_opacity * torch.ones(self.num_points, 1, device=self.device)))
         self.from_lidar = from_lidar.float()
     
@@ -422,8 +621,8 @@ class VanillaGaussians(nn.Module):
         do_refinement: bool
     ) -> None:
         self.after_train(radii, xys_grad, alphas, last_size)
-        if step % self.ctrl_cfg.refine_interval == 0 and do_refinement:
-            self.refinement_after(step, optimizer)
+        # if step % self.ctrl_cfg.refine_interval == 0 and do_refinement:
+        #     self.refinement_after(step, optimizer)
 
     def after_train(
         self,
@@ -455,6 +654,21 @@ class VanillaGaussians(nn.Module):
                 
             self.alpha_cum[full_mask] += torch.ones_like(alphas)[full_mask]
             self.alpha_cnt += 1
+
+
+            if self.method in ["nearest", "single", "single_multiply"]:
+                self._training_dir[full_mask] += self._training_temp_dir[full_mask]
+
+
+                if self._training_record is None:
+                    self._training_record = []
+
+
+                if "Rigid" in self.class_prefix:
+                    self._training_record.append((self._training_temp_dir * full_mask.float().unsqueeze(-1)).unsqueeze(0))
+
+
+                self._training_temp_dir = None
 
 
             # update the max screen size, as a ratio of number of pixels
@@ -892,10 +1106,17 @@ class VanillaGaussians(nn.Module):
         else:
             rgbs = torch.sigmoid(colors[:, 0, :])
         
+
+        # 0324 update trainview dict
+
+
         # get view-dependent uncertainty
         if is_uncertainty:
-            uncertainty_pdf = self.get_uncertainty(viewdirs, py=False)
-            actovated_colors = uncertainty_pdf.unsqueeze(-1)
+            uncertainty_pdf = self.get_uncertainty(viewdirs, py=False, is_diffusion_step=is_diffusion_step)
+            if len(uncertainty_pdf.shape) == 1:
+                actovated_colors = uncertainty_pdf.unsqueeze(-1)
+            else:
+                actovated_colors = uncertainty_pdf
         else:
             actovated_colors = rgbs
 
@@ -944,26 +1165,26 @@ class VanillaGaussians(nn.Module):
             else:
                 normal_align_loss = torch.tensor(0.0).to(self.device)
             # normals = 
-        if self.ground_gs:
-            # 2dgs
-            if True:
-                gs_dict = dict(
-                    _means=output_means.detach(),
-                    _opacities=activated_opacities.detach(),
-                    _rgbs=actovated_colors if not is_diffusion_step else actovated_colors.detach(), # not using diffusion to optimize ground for now
-                    _scales=activated_scales.detach(),
-                    _quats=activated_rotations.detach(),
-                    align_error=torch.tensor(0.0).to(self.device),
-                )
-            else:
-                gs_dict = dict(
-                        _means=output_means[filter_mask],
-                        _opacities=activated_opacities[filter_mask],
-                        _rgbs=actovated_colors[filter_mask],
-                        _scales=activated_scales[filter_mask].clip(0, self.clip_scale) if self.clip_scale is not None else activated_scales[filter_mask],
-                        _quats=quat[filter_mask],
-                        align_error=normal_align_loss,
-                    )
+        # if self.ground_gs:
+        #     # 2dgs
+        #     if True:
+        #         gs_dict = dict(
+        #             _means=output_means.detach(),
+        #             _opacities=activated_opacities.detach(),
+        #             _rgbs=actovated_colors if not is_diffusion_step else actovated_colors.detach(), # not using diffusion to optimize ground for now
+        #             _scales=activated_scales.detach(),
+        #             _quats=activated_rotations.detach(),
+        #             align_error=torch.tensor(0.0).to(self.device),
+        #         )
+        #     else:
+        #         gs_dict = dict(
+        #                 _means=output_means[filter_mask],
+        #                 _opacities=activated_opacities[filter_mask],
+        #                 _rgbs=actovated_colors[filter_mask],
+        #                 _scales=activated_scales[filter_mask].clip(0, self.clip_scale) if self.clip_scale is not None else activated_scales[filter_mask],
+        #                 _quats=quat[filter_mask],
+        #                 align_error=normal_align_loss,
+        #             )
             # 计算法向量
             
         else:
@@ -984,7 +1205,7 @@ class VanillaGaussians(nn.Module):
                     _scales=activated_scales[filter_mask].detach(),
                     _quats=activated_rotations[filter_mask].detach(),
                 )
-            elif is_diffusion_step and not is_uncertainty:
+            elif False:
                 with torch.no_grad():
                     uncertainty_pdf = self.get_uncertainty(viewdirs, py=True).unsqueeze(-1).clip(0, 1)
                     filtered_uncert_mask = 1 - uncertainty_pdf[filter_mask]
@@ -1092,7 +1313,8 @@ class VanillaGaussians(nn.Module):
             state_dict['_features_rest'] = state_dict['_features_rest'][:, :self._features_rest.shape[1]]
         else:
             assert state_dict['_features_rest'].shape[1] == self._features_rest.shape[1]
-        self._uncertainty = Parameter(torch.randn((N,) + self._uncertainty.shape[1:], device=self.device))
+        self._uncertainty = Parameter(torch.zeros((N,)  + self._uncertainty.shape[1:], device=self.device))
+        self._training_dir = Parameter(torch.randn((N,) + self._training_dir.shape[1:], device=self.device))
         self._opacities = Parameter(torch.zeros((N,) + self._opacities.shape[1:], device=self.device))
         self.from_lidar = torch.zeros(N, device=self.device)
         msg = super().load_state_dict(state_dict, strict=False)

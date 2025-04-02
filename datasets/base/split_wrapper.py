@@ -150,19 +150,20 @@ class SplitWrapper(torch.utils.data.IterableDataset):
             raise Exception("Invalid mode")
 
     def _generate_random_samples(self):
-        while True:
-            img_idx = self.datasource.propose_training_image(
-                candidate_indices=self.split_indices
-            )
+        return self._generate_sequential_samples_infinite()
+        # while True:
+        #     img_idx = self.datasource.propose_training_image(
+        #         candidate_indices=self.split_indices
+        #     )
             
-            current_downscale = self.camera_downscale
+        #     current_downscale = self.camera_downscale
             
-            downscale_factor = 1 / current_downscale * self.datasource.downscale_factor
-            self.datasource.update_downscale_factor(downscale_factor)
-            image_infos, cam_infos = self.datasource.get_image(img_idx % (key_frame_limit * 5))
-            self.datasource.reset_downscale_factor()
+        #     downscale_factor = 1 / current_downscale * self.datasource.downscale_factor
+        #     self.datasource.update_downscale_factor(downscale_factor)
+        #     image_infos, cam_infos = self.datasource.get_image(img_idx % (key_frame_limit * 5))
+        #     self.datasource.reset_downscale_factor()
             
-            yield image_infos, cam_infos
+        #     yield image_infos, cam_infos
 
     def _generate_sequential_samples(self):
         while True:

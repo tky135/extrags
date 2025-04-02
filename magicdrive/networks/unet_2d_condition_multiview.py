@@ -23,11 +23,11 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 
 from diffusers.configuration_utils import register_to_config
-from diffusers.models.unet_2d_condition import (
+from diffusers.models.unets.unet_2d_condition import (
     UNet2DConditionModel,
     UNet2DConditionOutput,
 )
-from diffusers.models.unet_2d_blocks import (
+from diffusers.models.unets.unet_2d_blocks import (
     CrossAttnDownBlock2D,
     CrossAttnUpBlock2D,
     DownBlock2D,

@@ -96,7 +96,7 @@ class RigidNodes(VanillaGaussians):
             shs[:, 0, :3] = torch.logit(init_colors, eps=1e-10)
         self._features_dc = Parameter(shs[:, 0, :])
         self._features_rest = Parameter(shs[:, 1:, :])
-        self._uncertainty = Parameter(torch.randn(self.num_points, self.uncertainty_num_coeffs, 1, device=self.device))
+        self._uncertainty = Parameter(torch.zeros(self.num_points, self.uncertainty_num_coeffs, 2, device=self.device))
         self._opacities = Parameter(torch.logit(0.1 * torch.ones(self.num_points, 1, device=self.device)))
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
@@ -430,7 +430,11 @@ class RigidNodes(VanillaGaussians):
             
         # get view-dependent uncertainty
         if is_uncertainty:
-            actovated_colors = self.get_uncertainty(viewdirs, py=False).unsqueeze(-1)
+            uncertainty_pdf = self.get_uncertainty(viewdirs, py=False, is_diffusion_step=is_diffusion_step)
+            if len(uncertainty_pdf.shape) == 1:
+                actovated_colors = uncertainty_pdf.unsqueeze(-1)
+            else:
+                actovated_colors = uncertainty_pdf
         else:
             actovated_colors = rgbs
         
@@ -451,7 +455,7 @@ class RigidNodes(VanillaGaussians):
                 _scales=activated_scales[filter_mask].detach(),
                 _quats=activated_rotations[filter_mask].detach(),
             )
-        elif is_diffusion_step and not is_uncertainty:
+        elif False:
             with torch.no_grad():
                 uncertainty_pdf = self.get_uncertainty(viewdirs, py=True).unsqueeze(-1).clip(0, 1)
                 filtered_uncert_mask = 1 - uncertainty_pdf[filter_mask]

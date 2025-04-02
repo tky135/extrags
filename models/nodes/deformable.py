@@ -102,7 +102,11 @@ class DeformableNodes(RigidNodes):
         activated_opacities = self.get_opacity * valid_mask.float().unsqueeze(-1)
         activated_rotations = self.quat_act(world_quats)
         if is_uncertainty:
-            actovated_colors = self.get_uncertainty(viewdirs, py=False).unsqueeze(-1)
+            uncertainty_pdf = self.get_uncertainty(viewdirs, py=False, is_diffusion_step=is_diffusion_step)
+            if len(uncertainty_pdf.shape) == 1:
+                actovated_colors = uncertainty_pdf.unsqueeze(-1)
+            else:
+                actovated_colors = uncertainty_pdf
         else:
             actovated_colors = rgbs
         # actovated_colors = torch.cat([rgbs, uncertainty_pdf.unsqueeze(-1)], dim=-1)
@@ -117,7 +121,7 @@ class DeformableNodes(RigidNodes):
                 _scales=activated_scales[filter_mask].detach(),
                 _quats=activated_rotations[filter_mask].detach(),
             )
-        elif is_diffusion_step and not is_uncertainty:
+        elif False:
             with torch.no_grad():
                 uncertainty_pdf = self.get_uncertainty(viewdirs, py=True).unsqueeze(-1).clip(0, 1)
                 filtered_uncert_mask = 1 - uncertainty_pdf[filter_mask]

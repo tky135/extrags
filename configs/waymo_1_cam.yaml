@@ -24,7 +24,7 @@ trainer:
     ssim:
       w: 0.2
     mask:
-      w: 0.5
+      w: 0.05
       opacity_loss_type: bce # choose from [bce, safe_bce]
     # depth:
     #   w: 0.01 # weight of depth loss
@@ -47,9 +47,7 @@ trainer:
     sh_rest:
       lr: 0.000125
     uncertainty:
-      lr: 1.0
-    traindir:
-      lr: 0.06
+      lr: 0.1
     opacity:
       lr: 0.05
     scaling:
@@ -58,8 +56,8 @@ trainer:
       lr: 0.001
   gaussian_ctrl_general_cfg:
     warmup_steps: 2000             # warmup steps for alpha
-    reset_alpha_interval: 300000    # reset alpha every n steps
-    refine_interval: 100000          # refine gaussians every n steps
+    reset_alpha_interval: 30000    # reset alpha every n steps
+    refine_interval: 300          # refine gaussians every n steps
     sh_degree_interval: 1000      # every n intervals turn on another sh degree # TODO adapt
     n_split_samples: 2            # number of samples to split gaussians into
     # may differ in different models
@@ -92,7 +90,14 @@ model:
       # sparse_reg:
       #   start_step: 35000
       #   w: 1e-1
-        
+  # CameraEncod:
+  #   type: models.modules.CameraEncodwBag
+  #   params:
+  #     n_camera: 6
+  #   optim:
+  #     all:
+  #       lr: 5.0e-5
+  #       weight_decay: 1.0e-6
   RigidNodes:
     type: models.nodes.RigidNodes
     init:
@@ -139,7 +144,7 @@ model:
       cull_scale_thresh: 0.1
       stop_screen_size_at: 40000
       stop_split_at: 30000
-      # sh_degree: 3
+      sh_degree: 3
       cull_out_of_bound: false
       use_deformgs_for_nonrigid: True # default True
       use_deformgs_after: 13000        # default 3000
@@ -174,6 +179,40 @@ model:
       ins_translation:
         lr: 0.0005
         lr_final: 0.0001
+  Ground_gs:
+    type: models.gaussians.VanillaGaussians
+    gaussian_2d: True
+    ground_gs: True
+    sdf_grad: False
+    # clip_scale: 0.05
+    # reg:
+    #   # sharp_shape_reg:
+    #   #   w: 1.
+    #   #   step_interval: 10
+    #   #   max_gauss_ratio: 5.
+    #   # sparse_reg:
+    #   #   w: 0.1
+    #   #   start_step: 10000
+    #   max_s_square_reg:
+    #     w: 0.1
+    optim:
+      xyz:
+        lr: 6.4e-04
+        lr_final: 1.6e-06
+        scale_factor: 10.0
+    ctrl:
+      densify_grad_thresh: 0.00005
+      cull_alpha_thresh: 0.005
+      sh_degree: 3
+      sh_degree_interval: 10000
+  # CameraEncod:
+  #   type: models.modules.CameraEncodwBag
+  #   params:
+  #     n_camera: 6
+  #   optim:
+  #     all:
+  #       lr: 5.0e-5
+  #       weight_decay: 1.0e-6
   # SMPLNodes: 
   #   type: models.nodes.SMPLNodes
   #   init:
@@ -244,36 +283,10 @@ model:
   #     freeze_s: false
   #     freeze_shs_dc: false
   #     freeze_shs_rest: false
-  Ground_gs:
-    type: models.gaussians.VanillaGaussians
-    gaussian_2d: True
-    ground_gs: True
-    sdf_grad: False
-    # clip_scale: 0.05
-    # reg:
-    #   # sharp_shape_reg:
-    #   #   w: 1.
-    #   #   step_interval: 10
-    #   #   max_gauss_ratio: 5.
-    #   # sparse_reg:
-    #   #   w: 0.1
-    #   #   start_step: 10000
-    #   max_s_square_reg:
-    #     w: 0.1
-    optim:
-      xyz:
-        lr: 6.4e-04
-        lr_final: 1.6e-06
-        scale_factor: 10.0
-    ctrl:
-      densify_grad_thresh: 0.00005
-      cull_alpha_thresh: 0.005
-      sh_degree: 3
-      sh_degree_interval: 10000
   Ground:
     type: models.modules.Ground
     pretrain_method: lidar # [egopose, lidar]
-    pretrain_iters: 0
+    pretrain_iters: 25000
     params:
       batch_size: 8192
       resolution: 1024
@@ -322,14 +335,14 @@ model:
   #   type: models.modules.CameraOptModule_ts
   #   optim:
   #     all:
-  #       lr: 1.0e-5
-  #       weight_decay: 1.0e-6
+  #       lr: 1.0e-6
+  #       weight_decay: 1.0e-5
   # ExtrinsicPose_neus:
   #   type: models.modules.ExtrinsicOptModule
   #   optim:
   #     all:
-  #       lr: 1.0e-5
-  #       weight_decay: 1.0e-6
+  #       lr: 1.0e-6
+  #       weight_decay: 1.0e-5
 
   # CamPose:
   #   type: models.modules.CameraOptModule
@@ -356,5 +369,5 @@ render:
 logging:
   vis_freq: 2000 # how often to visualize training stats
   print_freq: 500 # how often to print training stats
-  saveckpt_freq: 5000 # how often to save checkpoints
+  saveckpt_freq: 15000 # how often to save checkpoints
   save_seperate_video: True # whether to save seperate videos for each scene

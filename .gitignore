@@ -22,3 +22,4 @@ __pycache__/
 /.*/
 /pretrained 
 /third_party
+/img_cache/

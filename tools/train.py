@@ -343,8 +343,8 @@ def main(args):
     diff_start = 30000
     trainer.diff_start = diff_start
     diff_freq = 10
-    mgd_order = trainer.mgd.mgd_order
-    cam_name2mgd_order = {cam_name: i for i, cam_name in enumerate(mgd_order)}
+    # mgd_order = trainer.mgd.mgd_order
+    # cam_name2mgd_order = {cam_name: i for i, cam_name in enumerate(mgd_order)}
 
 
     if diff_method == 'direct':
@@ -370,126 +370,48 @@ def main(args):
     # )
     sample2shift_vec = dict()
     for step in metric_logger.log_every(all_iters, cfg.logging.print_freq):
-
-        # update shift set every 2000 steps
-        if step > diff_start and step % diff_start == 0 and diff_method == 'direct':
-            raise Exception
-        # if diff_method == 'direct':
-            # update shift buffer
-            dataset.diff_image_set.mode = "sequential"
-            diffiter = dataset.diff_image_set.get_iterator(num_workers=4, prefetch_factor=2)
-
-            shift_x = random.choice(shift_x_l)
-            timestep = 50
-
-
-            timestamp_counter = 0
-
-            while True:
-                try:
-                    image_6_views = {}
-                    inpainting_mask_6_views = {}
-                    current_sample_token = None
-                    cam_shift_vector_w = None
-                    for cam_id in range(trainer.n_camera):
-                        diff_image_infos, diff_cam_infos = next(diffiter)
-                        for k, v in diff_image_infos.items():
-                            if isinstance(v, torch.Tensor):
-                                diff_image_infos[k] = v[0].cuda(non_blocking=True)
-                        for k, v in diff_cam_infos.items():
-                            if isinstance(v, torch.Tensor):
-                                diff_cam_infos[k] = v[0].cuda(non_blocking=True)
-                        if 'road_masks' in diff_image_infos:
-                            diff_image_infos['road_masks'][-1, -1] = 1.0
-                        if current_sample_token is None:
-                            current_sample_token = diff_image_infos['sample_tokens'][0]
-                        else:
-                            assert diff_image_infos['sample_tokens'][0] == current_sample_token
-
-
-                        # get shift vector in world coordinate
-                        if diff_cam_infos['cam_name'][0] == 'CAM_FRONT': # TODO Assuming x axis of CAM_FRONT is the same as LiDAR
-                            c2w = diff_cam_infos['camera_to_world'].clone()
-                            cam_x_axis_w = c2w[:3, :3] @ torch.tensor([1, 0, 0], device=c2w.device, dtype=c2w.dtype)
-                            cam_shift_vector_w = -cam_x_axis_w * shift_x
-                            buffer_cam_shift_vector_w[current_sample_token] = cam_shift_vector_w.clone().cpu()
-                        
-                        # shift camera
-                        c2w = diff_cam_infos['camera_to_world'].clone()
-                        c2w[:3, 3] += cam_shift_vector_w
-                        diff_cam_infos['camera_to_world'] = c2w
-                        
-                        diff_outputs = trainer(diff_image_infos, diff_cam_infos, is_diffusion_step=True)
-                        image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1).detach()
-                        
-                        # dilate inpainting mask
-                        inpainting_mask = (diff_outputs['RigidNodes_opacity'] > 0.1).float().squeeze()
-                        inpainting_mask = dilate(inpainting_mask, kernel_size=17)
-
-                        inpainting_mask_6_views[diff_cam_infos['cam_name'][0]] = inpainting_mask.unsqueeze(0).detach().repeat(3, 1, 1)
-                    image_6_views_l = [image_6_views[cam_name] for cam_name in trainer.mgd.mgd_order]
-                    inpainting_mask_6_views_l = [inpainting_mask_6_views[cam_name] for cam_name in trainer.mgd.mgd_order]
-                    image_6_views_ts = torch.stack(image_6_views_l, dim=0)
-                    inpainting_mask_6_views_ts = torch.stack(inpainting_mask_6_views_l, dim=0)
-                    
-                    image_6_views_ts = F.interpolate(image_6_views_ts, size=(224, 400), mode='bilinear', align_corners=False)
-                    inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(224, 400), mode='nearest')
-                    # image_6_views_ts = F.interpolate(image_6_views_ts, size=(424, 800), mode='bilinear', align_corners=False)
-                    # inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(424, 800), mode='nearest')
-                    
-                    image_6_views_ts = (image_6_views_ts.unsqueeze(0) - 0.5) * 2.0
-                    trainer.mgd.save_image0_from_pixels(image_6_views_ts, f'image_6_views_{timestamp_counter}.png')
-                    trainer.mgd.save_image0_from_pixels(inpainting_mask_6_views_ts.unsqueeze(0), f'inpainting_mask_6_views_{timestamp_counter}.png')
-                    with torch.no_grad():
-                        loss, retdict = trainer.mgd.get_loss(image_6_views_ts, current_sample_token, timestep, shift_x=shift_x, step=timestamp_counter, method=diff_method, inpainting_mask=inpainting_mask_6_views_ts)
-                        buffer_shift[current_sample_token] = retdict['target_image'].cpu()
-                        buffer_mask[current_sample_token] = inpainting_mask_6_views_ts.cpu()
-                    timestamp_counter += 1
-
-                except StopIteration:
-                    break
         # ----------------------------------------------------------------------------
         # ----------------------------     Validate     ------------------------------
-        if step % cfg.logging.vis_freq == 0 and cfg.logging.vis_freq > 0:
-            trainer.set_eval()
-            logger.info("Visualizing...")
-            vis_timestep = np.linspace(
-                0,
-                dataset.num_img_timesteps,
-                trainer.num_iters // cfg.logging.vis_freq + 1,
-                endpoint=False,
-                dtype=int,
-            )[step // cfg.logging.vis_freq]
-            # with torch.no_grad():
-            metrics_dict = render(
-                dataset=dataset.full_image_set,
-                trainer=trainer,
-                save_path=os.path.join(
-                    cfg.log_dir, "images", f"step_{step}.mp4"
-                ),
-                layout=dataset.layout,
-                num_timestamps=1,
-                keys=render_keys,
-                num_cams=trainer.n_camera,
-                save_images=False,
-                fps=cfg.render.fps,
-                compute_metrics=True,
-                compute_error_map=cfg.render.vis_error,
-                vis_indices=[
-                    vis_timestep * trainer.n_camera + i
-                    for i in range(trainer.n_camera)
-                ],
-            )
-            if args.enable_wandb:
-                wandb.log(
-                    {
-                        "image_metrics/psnr": metrics_dict["psnr"],
-                        "image_metrics/ssim": metrics_dict["ssim"],
-                        "image_metrics/occupied_psnr": metrics_dict["occupied_psnr"],
-                        "image_metrics/occupied_ssim": metrics_dict["occupied_ssim"],
-                    }
-                )
-            torch.cuda.empty_cache()
+        # if step % cfg.logging.vis_freq == 0 and cfg.logging.vis_freq > 0:
+        #     trainer.set_eval()
+        #     logger.info("Visualizing...")
+        #     vis_timestep = np.linspace(
+        #         0,
+        #         dataset.num_img_timesteps,
+        #         trainer.num_iters // cfg.logging.vis_freq + 1,
+        #         endpoint=False,
+        #         dtype=int,
+        #     )[step // cfg.logging.vis_freq]
+        #     # with torch.no_grad():
+        #     metrics_dict = render(
+        #         dataset=dataset.full_image_set,
+        #         trainer=trainer,
+        #         save_path=os.path.join(
+        #             cfg.log_dir, "images", f"step_{step}.mp4"
+        #         ),
+        #         layout=dataset.layout,
+        #         num_timestamps=1,
+        #         keys=render_keys,
+        #         num_cams=trainer.n_camera,
+        #         save_images=False,
+        #         fps=cfg.render.fps,
+        #         compute_metrics=True,
+        #         compute_error_map=cfg.render.vis_error,
+        #         vis_indices=[
+        #             vis_timestep * trainer.n_camera + i
+        #             for i in range(trainer.n_camera)
+        #         ],
+        #     )
+        #     if args.enable_wandb:
+        #         wandb.log(
+        #             {
+        #                 "image_metrics/psnr": metrics_dict["psnr"],
+        #                 "image_metrics/ssim": metrics_dict["ssim"],
+        #                 "image_metrics/occupied_psnr": metrics_dict["occupied_psnr"],
+        #                 "image_metrics/occupied_ssim": metrics_dict["occupied_ssim"],
+        #             }
+        #         )
+        #     torch.cuda.empty_cache()
         #----------------------------------------------------------------------------
         #----------------------------  training step  -------------------------------
         # prepare for training
@@ -720,27 +642,20 @@ def main(args):
                         diff_cam_infos[k] = v[0].cuda(non_blocking=True)
                 if 'road_masks' in diff_image_infos:
                     diff_image_infos['road_masks'][-1, -1] = 1.0
-                if current_sample_token is None:
-                    current_sample_token = diff_image_infos['sample_tokens'][0]
-                else:
-                    assert diff_image_infos['sample_tokens'][0] == current_sample_token
 
 
                 # get shift vector in world coordinate
-                if diff_cam_infos['cam_name'][0] == 'CAM_FRONT': # TODO Assuming x axis of CAM_FRONT is the same as LiDAR
+                if diff_cam_infos['cam_name'][0] in ['CAM_FRONT', 'front_camera']: # TODO Assuming x axis of CAM_FRONT is the same as LiDAR
                     c2w = diff_cam_infos['camera_to_world'].clone()
                     cam_shift_vector_w = torch.tensor([-shift_x, 0, 0], device=c2w.device, dtype=c2w.dtype)
+
+                    # cam_shift_vector_w = torch.tensor([0, -shift_x, 0], device=c2w.device, dtype=c2w.dtype)
 
                     frame_idx = diff_image_infos['frame_idx'].flatten()[0].item()
 
                     lidar2w = dataset.lidar_source.lidar_to_worlds[frame_idx].to(device=c2w.device, dtype=c2w.dtype)
                     lidar_shift_vector = lidar2w[:3, :3] @ cam_shift_vector_w
 
-                    if current_sample_token in sample2shift_vec:
-                        assert torch.allclose(sample2shift_vec[current_sample_token], lidar_shift_vector.cpu())
-                    else:
-                        sample2shift_vec[current_sample_token] = lidar_shift_vector.cpu()
-                    
                 
                 # shift camera
                 c2w = diff_cam_infos['camera_to_world'].clone()
@@ -748,17 +663,17 @@ def main(args):
                 diff_cam_infos['camera_to_world'] = c2w
                 
                 diff_outputs = trainer(diff_image_infos, diff_cam_infos, is_diffusion_step=True)
-                if cam_id == random_camera:
-                    image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1)# .detach()
-                else:
-                    image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1).detach()
+                # if cam_id == random_camera:
+                #     image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1)# .detach()
+                # else:
+                #     image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1).detach()
                 
-                # dilate inpainting mask
-                inpainting_mask = diff_outputs['uncertainty']['rgb_gaussians'].float().squeeze()
-                # inpainting_mask = (diff_outputs['RigidNodes_opacity'] > 0.1).float().squeeze()
-                # inpainting_mask = dilate(inpainting_mask, kernel_size=11, gaussian=True)
+                # # dilate inpainting mask
+                # inpainting_mask = diff_outputs['uncertainty']['rgb_gaussians'].float().squeeze()
+                # # inpainting_mask = (diff_outputs['RigidNodes_opacity'] > 0.1).float().squeeze()
+                # # inpainting_mask = dilate(inpainting_mask, kernel_size=11, gaussian=True)
 
-                inpainting_mask_6_views[diff_cam_infos['cam_name'][0]] = inpainting_mask.unsqueeze(0).detach().repeat(3, 1, 1)
+                # inpainting_mask_6_views[diff_cam_infos['cam_name'][0]] = inpainting_mask.unsqueeze(0).detach().repeat(3, 1, 1)
             
             # deal with chosen camera
             for cam_id in range(trainer.n_camera):
@@ -773,16 +688,17 @@ def main(args):
                         diff_cam_infos[k] = v[0].cuda(non_blocking=True)
                 if 'road_masks' in diff_image_infos:
                     diff_image_infos['road_masks'][-1, -1] = 1.0
-                if current_sample_token is None:
-                    current_sample_token = diff_image_infos['sample_tokens'][0]
-                else:
-                    assert diff_image_infos['sample_tokens'][0] == current_sample_token
+                # if current_sample_token is None:
+                #     current_sample_token = diff_image_infos['sample_tokens'][0]
+                # else:
+                #     assert diff_image_infos['sample_tokens'][0] == current_sample_token
 
 
                 # get shift vector in world coordinate
                 if diff_cam_infos['cam_name'][0] == 'CAM_FRONT': # TODO Assuming x axis of CAM_FRONT is the same as LiDAR
                     c2w = diff_cam_infos['camera_to_world'].clone()
                     cam_shift_vector_w = torch.tensor([-shift_x, 0, 0], device=c2w.device, dtype=c2w.dtype)
+                    # cam_shift_vector_w = torch.tensor([0, -shift_x, 0], device=c2w.device, dtype=c2w.dtype)
                 
                 # shift camera
                 c2w = diff_cam_infos['camera_to_world'].clone()
@@ -790,112 +706,119 @@ def main(args):
                 diff_cam_infos['camera_to_world'] = c2w
                 
                 diff_outputs = trainer(diff_image_infos, diff_cam_infos, is_diffusion_step=True)
-                if cam_id == random_camera:
-                    image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1)# .detach()
-                else:
-                    image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1).detach()
+                # if cam_id == random_camera:
+                #     image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1)# .detach()
+                # else:
+                #     image_6_views[diff_cam_infos['cam_name'][0]] = diff_outputs['rgb'].permute(2, 0, 1).detach()
                 
-                # dilate inpainting mask
-                inpainting_mask = diff_outputs['uncertainty']['rgb_gaussians'].float().squeeze()
-                # inpainting_mask = (diff_outputs['RigidNodes_opacity'] > 0.1).float().squeeze()
-                # inpainting_mask = dilate(inpainting_mask, kernel_size=33)
-                # inpainting_mask = dilate(inpainting_mask, kernel_size=11, gaussian=True)
+                # # dilate inpainting mask
+                # inpainting_mask = diff_outputs['uncertainty']['rgb_gaussians'].float().squeeze()
+                # # inpainting_mask = (diff_outputs['RigidNodes_opacity'] > 0.1).float().squeeze()
+                # # inpainting_mask = dilate(inpainting_mask, kernel_size=33)
+                # # inpainting_mask = dilate(inpainting_mask, kernel_size=11, gaussian=True)
 
 
-                inpainting_mask_6_views[diff_cam_infos['cam_name'][0]] = inpainting_mask.unsqueeze(0).detach().repeat(3, 1, 1)
+                # inpainting_mask_6_views[diff_cam_infos['cam_name'][0]] = inpainting_mask.unsqueeze(0).detach().repeat(3, 1, 1)
+            
+            # loss_dict = {}
+            # loss_dict['diff_loss'] = torch.tensor(0.0, device=image_6_views[diff_cam_infos['cam_name'][0]].device) #* torch.sum(image_6_views[diff_cam_infos['cam_name'][0]])
+            # trainer.backward(loss_dict, is_diffusion_step=True)
+            # del loss_dict
+            del image_infos, cam_infos, diff_outputs
+
 
             
-            image_6_views_l = [image_6_views[cam_name] for cam_name in trainer.mgd.mgd_order]
-            inpainting_mask_6_views_l = [inpainting_mask_6_views[cam_name] for cam_name in trainer.mgd.mgd_order]
-            image_6_views_ts = torch.stack(image_6_views_l, dim=0)
-            inpainting_mask_6_views_ts = torch.stack(inpainting_mask_6_views_l, dim=0)
-            image_6_views_ts = F.interpolate(image_6_views_ts, size=(224, 400), mode='bilinear', align_corners=False)
-            inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(224, 400), mode='bilinear')
-            # image_6_views_ts = F.interpolate(image_6_views_ts, size=(424, 800), mode='bilinear', align_corners=False)
-            # inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(424, 800), mode='bilinear')
+            # image_6_views_l = [image_6_views[cam_name] for cam_name in trainer.mgd.mgd_order]
+            # inpainting_mask_6_views_l = [inpainting_mask_6_views[cam_name] for cam_name in trainer.mgd.mgd_order]
+            # image_6_views_ts = torch.stack(image_6_views_l, dim=0)
+            # inpainting_mask_6_views_ts = torch.stack(inpainting_mask_6_views_l, dim=0)
+            # image_6_views_ts = F.interpolate(image_6_views_ts, size=(224, 400), mode='bilinear', align_corners=False)
+            # inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(224, 400), mode='bilinear')
+            # # image_6_views_ts = F.interpolate(image_6_views_ts, size=(424, 800), mode='bilinear', align_corners=False)
+            # # inpainting_mask_6_views_ts = F.interpolate(inpainting_mask_6_views_ts, size=(424, 800), mode='bilinear')
             
-            inpainting_mask_6_views_ts = (1 - inpainting_mask_6_views_ts).clip(0, 1)
-            inpainting_mask_6_views_ts = dilate(inpainting_mask_6_views_ts, kernel_size=45, gaussian=True).clip(0, 1)
-            image_6_views_ts = (image_6_views_ts.unsqueeze(0) - 0.5) * 2.0
+            # inpainting_mask_6_views_ts = (1 - inpainting_mask_6_views_ts).clip(0, 1)
+            # inpainting_mask_6_views_ts = dilate(inpainting_mask_6_views_ts, kernel_size=45, gaussian=True).clip(0, 1)
+            # image_6_views_ts = (image_6_views_ts.unsqueeze(0) - 0.5) * 2.0
 
-            # rint = 0
-            rint = random.randint(0, 5)
-            frame_idx = diff_image_infos['frame_idx'].flatten()[0].item()
-            if rint == 0:
-                with torch.no_grad():
-                    # blended_img = image_6_views_ts * inpainting_mask_6_views_ts.unsqueeze(0) + (1 - inpainting_mask_6_views_ts.unsqueeze(0)) * torch.tensor([-1, 1, -1], device=image_6_views_ts.device).view(1, 1, 3, 1, 1)
-                    # trainer.mgd.save_image0_from_pixels(blended_img, f'blended_{frame_idx}_{step}_{random_camera}.png')
-                    trainer.mgd.save_image0_from_pixels(image_6_views_ts, f'image_views_{frame_idx}_{step}_{random_camera}.png')
-                    # trainer.mgd.save_image0_from_pixels((inpainting_mask_6_views_ts.unsqueeze(0) - 0.5) * 2.0, f'inpainting_mask_{frame_idx}_{step}_{random_camera}.png')
+            # # rint = 0
+            # rint = random.randint(0, 5)
+            # frame_idx = diff_image_infos['frame_idx'].flatten()[0].item()
+            # if rint == 0:
+            #     with torch.no_grad():
+            #         # blended_img = image_6_views_ts * inpainting_mask_6_views_ts.unsqueeze(0) + (1 - inpainting_mask_6_views_ts.unsqueeze(0)) * torch.tensor([-1, 1, -1], device=image_6_views_ts.device).view(1, 1, 3, 1, 1)
+            #         # trainer.mgd.save_image0_from_pixels(blended_img, f'blended_{frame_idx}_{step}_{random_camera}.png')
+            #         trainer.mgd.save_image0_from_pixels(image_6_views_ts, f'image_views_{frame_idx}_{step}_{random_camera}.png')
+            #         # trainer.mgd.save_image0_from_pixels((inpainting_mask_6_views_ts.unsqueeze(0) - 0.5) * 2.0, f'inpainting_mask_{frame_idx}_{step}_{random_camera}.png')
             
 
-            inpainting_mask_6_views_ts_ss = inpainting_mask_6_views_ts.reshape(image_6_views_ts.shape)
-            image_6_views_ts = image_6_views_ts * inpainting_mask_6_views_ts_ss + (1 - inpainting_mask_6_views_ts_ss) * image_6_views_ts
-
-            kwargs = {
-                "resample": 2,
-                "num_ts": 10,
-                "ts": timestep,
-                "inmask_g_scale": 2.0,
-                "stochastic": False,
-                "cfg_scale": 2.0,
-                "scene_idx": trainer.scene_idx
-            }
-
-            loss, retdict = trainer.mgd.get_loss(image_6_views_ts, current_sample_token, None, shift_x=shift_x, step=step, method=diff_method, inpainting_mask=torch.ones_like(inpainting_mask_6_views_ts), **kwargs)
-
-            loss *= diff_loss_weight
-
-
-
-            print(f'diff loss: {loss}')
-            loss_dict = {}
-            loss_dict['diff_loss'] = loss
-            target_img_latent = retdict['target_latent'].detach()
-            if rint == 0:
-                trainer.mgd.save_image0_from_latents(target_img_latent, f'target_img_latent_{frame_idx}_{step}_{timestep}.png')
-
+            # inpainting_mask_6_views_ts_ss = inpainting_mask_6_views_ts.reshape(image_6_views_ts.shape)
+            # image_6_views_ts = image_6_views_ts * inpainting_mask_6_views_ts_ss + (1 - inpainting_mask_6_views_ts_ss) * image_6_views_ts
 
             # kwargs = {
             #     "resample": 2,
             #     "num_ts": 10,
-            #     "ts": 1000,
-            #     "inmask_g_scale": 0
-            # }
-            # if True:
-            #     kwargs = {
-            #     "resample": 3,
-            #     "num_ts": 25,
-            #     "ts": 300,
-            #     "inmask_g_scale": 0.5,
+            #     "ts": timestep,
+            #     "inmask_g_scale": 2.0,
             #     "stochastic": False,
-            #     "cfg_scale": 2.0
+            #     "cfg_scale": 2.0,
+            #     "scene_idx": trainer.scene_idx
             # }
-            #     loss, retdict = trainer.mgd.get_loss(image_6_views_ts, current_sample_token, None, shift_x=shift_x, step=step, method=diff_method, inpainting_mask=inpainting_mask_6_views_ts, **kwargs)
 
-            #     loss *= diff_loss_weight
+            # loss, retdict = trainer.mgd.get_loss(image_6_views_ts, current_sample_token, None, shift_x=shift_x, step=step, method=diff_method, inpainting_mask=torch.ones_like(inpainting_mask_6_views_ts), **kwargs)
 
-
-
-            #     print(f'diff loss: {loss}')
-            #     loss_dict = {}
-            #     loss_dict['diff_loss'] = loss
-            #     target_img_latent = retdict['target_latent'].detach()
-            #     if True:
-            #         trainer.mgd.save_image0_from_pixels(image_6_views_ts, f'image_views_{frame_idx}_{step}_{random_camera}.png')
-            #         trainer.mgd.save_image0_from_latents(target_img_latent, f'target_img_latent_{frame_idx}_{step}_{timestep}.png')
+            # loss *= diff_loss_weight
 
 
-            # check nan or inf
-            for k, v in loss_dict.items():
-                if torch.isnan(v).any():
-                    raise ValueError(f"NaN detected in loss {k} at step {step}")
-                if torch.isinf(v).any():
-                    raise ValueError(f"Inf detected in loss {k} at step {step}")
-            trainer.backward(loss_dict, is_diffusion_step=True)
 
-            # after training step
-            trainer.postprocess_per_train_step(step=step, diff_grad=True, do_refinement=False)
+            # print(f'diff loss: {loss}')
+            # loss_dict = {}
+            # loss_dict['diff_loss'] = loss
+            # target_img_latent = retdict['target_latent'].detach()
+            # if rint == 0:
+            #     trainer.mgd.save_image0_from_latents(target_img_latent, f'target_img_latent_{frame_idx}_{step}_{timestep}.png')
+
+
+            # # kwargs = {
+            # #     "resample": 2,
+            # #     "num_ts": 10,
+            # #     "ts": 1000,
+            # #     "inmask_g_scale": 0
+            # # }
+            # # if True:
+            # #     kwargs = {
+            # #     "resample": 3,
+            # #     "num_ts": 25,
+            # #     "ts": 300,
+            # #     "inmask_g_scale": 0.5,
+            # #     "stochastic": False,
+            # #     "cfg_scale": 2.0
+            # # }
+            # #     loss, retdict = trainer.mgd.get_loss(image_6_views_ts, current_sample_token, None, shift_x=shift_x, step=step, method=diff_method, inpainting_mask=inpainting_mask_6_views_ts, **kwargs)
+
+            # #     loss *= diff_loss_weight
+
+
+
+            # #     print(f'diff loss: {loss}')
+            # #     loss_dict = {}
+            # #     loss_dict['diff_loss'] = loss
+            # #     target_img_latent = retdict['target_latent'].detach()
+            # #     if True:
+            # #         trainer.mgd.save_image0_from_pixels(image_6_views_ts, f'image_views_{frame_idx}_{step}_{random_camera}.png')
+            # #         trainer.mgd.save_image0_from_latents(target_img_latent, f'target_img_latent_{frame_idx}_{step}_{timestep}.png')
+
+
+            # # check nan or inf
+            # for k, v in loss_dict.items():
+            #     if torch.isnan(v).any():
+            #         raise ValueError(f"NaN detected in loss {k} at step {step}")
+            #     if torch.isinf(v).any():
+            #         raise ValueError(f"Inf detected in loss {k} at step {step}")
+            # trainer.backward(loss_dict, is_diffusion_step=True)
+
+            # # after training step
+            # trainer.postprocess_per_train_step(step=step, diff_grad=True, do_refinement=False)
 
             
     with open(os.path.join(trainer.log_dir, "sample2shift_vec.json"), 'w') as f:

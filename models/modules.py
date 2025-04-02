@@ -13,7 +13,216 @@ from models.embedder import get_embedder_neus
 import tinycudann as tcnn
 # import wandb
 logger = logging.getLogger()
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import cm
+FAR_DEPTH = 60.0
 
+
+
+import json
+from pathlib import Path
+import uuid
+from PIL import Image
+import torchvision.transforms as transforms
+import torchvision
+class DiskDict:
+    def __init__(self, directory, idx=None, save_format='pt', storage='memory'):
+        self.directory = Path(directory)
+        self.idx=idx
+        self.save_format = save_format
+        self.directory.mkdir(parents=True, exist_ok=True)
+        metadata_dir = self.directory / 'metadata'
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_path = metadata_dir / f'{self._generate_filename()}'.replace('.png', '.json').replace('.pt', '.json')
+
+        self.in_memory = {}
+        self.metadata = {}
+        self.storage = storage
+        self.memory_storage = {}
+
+        # if self.metadata_path.exists():
+        #     with open(self.metadata_path, 'r') as f:
+        #         self.metadata = json.load(f)
+        #     to_remove = [key for key, filename in self.metadata.items() if not (self.directory / filename).exists()]
+        #     for key in to_remove:
+        #         del self.metadata[key]
+        #     if to_remove:
+        #         self._save_metadata()
+
+    def __setitem__(self, key, value):
+        self.metadata[key] = {}
+        self.metadata[key]['tensor_device'] = value.device.type
+        self.metadata[key]['channel_last'] = False
+        if value.shape[-1] == 1 or value.shape[-1] == 3:
+            value = value.permute(2, 0, 1)
+            self.metadata[key]['channel_last'] = True
+        self.metadata[key]['shape'] = value.shape
+        if self._is_tensor_image(value):
+            if key in self.metadata and 'filename' in self.metadata[key]:
+                old_filename = self.metadata[key]['filename']
+                old_path = self.directory / key / old_filename
+                if old_path.exists():
+                    old_path.unlink()
+            filename = self._generate_filename()
+            filedir = self.directory / key
+            filedir.mkdir(parents=True, exist_ok=True)
+            filepath = filedir / filename
+            self._save_to_disk(value, filepath)
+            self.metadata[key]['filename'] = filename
+            self._save_metadata()
+            if key in self.in_memory:
+                del self.in_memory[key]
+        else:
+            self.in_memory[key] = value
+            if key in self.metadata:
+                old_filename = self.metadata.pop(key)
+                old_path = self.directory / key / old_filename
+                if old_path.exists():
+                    old_path.unlink()
+                self._save_metadata()
+    
+    
+
+    def __getitem__(self, key):
+        if key in self.in_memory:
+            return self.in_memory[key]
+        elif key in self.metadata:
+            filename = self.metadata[key]['filename']
+            filepath = self.directory / key / filename
+            if filepath.exists() or filepath in self.memory_storage:
+                img_tensor = self._load_from_disk(filepath)
+                if self.metadata[key]['shape'][0] == 1:
+                    img_tensor = img_tensor[0:1, :, :]
+                if self.metadata[key]['channel_last']:
+                    img_tensor = img_tensor.permute(1, 2, 0).to(self.metadata[key]['tensor_device'])
+
+                return img_tensor
+            else:
+                del self.metadata[key]
+                self._save_metadata()
+                raise KeyError(key)
+        else:
+            raise KeyError(key)
+
+    def __delitem__(self, key):
+        deleted = False
+        if key in self.in_memory:
+            del self.in_memory[key]
+            deleted = True
+        if key in self.metadata and 'filename' in self.metadata[key]:
+            filename = self.metadata[key].pop('filename')
+            filepath = self.directory / filename
+            if filepath.exists():
+                filepath.unlink()
+            self._save_metadata()
+            deleted = True
+        if not deleted:
+            raise KeyError(key)
+
+    def __contains__(self, key):
+        return key in self.in_memory or key in self.metadata
+
+    def keys(self):
+        return set(self.in_memory.keys()) | set(self.metadata.keys())
+
+    def __iter__(self):
+        return iter(self.keys())
+
+    def __len__(self):
+        return len(self.in_memory) + len(self.metadata)
+
+    def _is_tensor_image(self, value):
+        if not isinstance(value, torch.Tensor):
+            return False
+        if value.dim() != 3:
+            return False
+        if value.size(0) not in (1, 3):
+            return False
+        # if (value < 0).any() or (value > 1).any():
+        #     return False
+        return True
+
+    def _generate_filename(self):
+        if self.idx is not None:
+            return f"{self.idx:04d}.{uuid.uuid4().hex}.{self.save_format}"
+        else:
+            return f"{uuid.uuid4().hex}.{self.save_format}"
+
+    def _save_to_disk(self, tensor, path):
+        if self.storage == "disk":
+            if self.save_format == 'pt':
+                torch.save(tensor, path)
+            elif self.save_format in ['png', 'jpg']:
+                torchvision.utils.save_image(tensor.unsqueeze(0), path)
+            else:
+                raise ValueError(f"Unsupported format: {self.save_format}")
+        elif self.storage == "memory":
+            self.memory_storage[path] = tensor.to('cpu')
+        else:
+            raise Exception("Unsupported storage type")
+
+    def _load_from_disk(self, path):
+        if self.storage == "disk":
+            if self.save_format == 'pt':
+                return torch.load(path)
+            elif self.save_format in ['png', 'jpg']:
+                img = Image.open(path)
+                img = transforms.ToTensor()(img)
+                return img
+            else:
+                raise ValueError(f"Unsupported format: {self.save_format}")
+        elif self.storage == "memory":
+            return self.memory_storage[path]
+
+    def _save_metadata(self):
+        with open(self.metadata_path, 'w') as f:
+            json.dump(self.metadata, f)
+
+def visualize_depth(depth_map, colormap='turbo', invert=False, normalize=False):
+    """
+    将单通道深度图转换为三通道彩色图像用于可视化。
+    
+    参数:
+        depth_map: numpy数组，形状为 [H, W]，取值范围为 [0, 1]
+        colormap: 字符串，表示使用的颜色映射，选项包括:
+                 'turbo', 'jet', 'viridis', 'plasma', 'inferno', 'magma', 'cividis',
+                 'rainbow', 'hot', 'cool', 'spectral', 'nipy_spectral'
+        invert: 布尔值，是否反转深度值（使远处为暗色，近处为亮色）
+        normalize: 布尔值，是否重新归一化深度值到 [0, 1] 范围
+                  
+    返回:
+        rgb_map: numpy数组，形状为 [H, W, 3]，取值范围为 [0, 1]
+    """
+    # 确保输入是numpy数组
+    depth_map = np.asarray(depth_map)
+    
+    # 检查输入范围
+    if normalize or depth_map.min() < 0 or depth_map.max() > 1:
+        # 重新归一化到 [0, 1]
+        d_min, d_max = depth_map.min(), depth_map.max()
+        if d_max > d_min:
+            depth_map = (depth_map - d_min) / (d_max - d_min)
+        else:
+            depth_map = np.zeros_like(depth_map)
+    
+    # 可选：反转深度值
+    if invert:
+        depth_map = 1.0 - depth_map
+        
+    # 获取colormap函数
+    cmap = cm.get_cmap(colormap)
+    
+    # 应用colormap
+    colored_map = cmap(depth_map)
+    
+    # 去掉alpha通道（如果有）
+    if colored_map.shape[-1] == 4:
+        rgb_map = colored_map[..., :3]
+    else:
+        rgb_map = colored_map
+        
+    return rgb_map
 def diffuse_points(ego_points: torch.Tensor, M: int, sigma: float = 0.1) -> torch.Tensor:
     """
     Generate a diffused point set around the original 2D points.
@@ -964,8 +1173,8 @@ class Ground(nn.Module):
         if not os.path.exists(self.base_exp_dir):
             os.makedirs(self.base_exp_dir)
         
-        
-        
+        self.z_cache = {} # mapping from cam_id to z_val for neus
+        self.rgb_cache = {}
     def validate_image(self, image_infos, camera_infos, idx=-1):
         # assert idx >= 0
 
@@ -993,21 +1202,34 @@ class Ground(nn.Module):
         
         camera_encod = camera_infos['cam_id'].reshape(-1, 1)[0]
         H, W, _ = rays_o.shape
-        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
-        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
+        rays_o = rays_o.reshape(-1, 3).split(80000)
+        rays_d = rays_d.reshape(-1, 3).split(80000)
+        img_idx = image_infos['img_idx'].flatten()[0].item()
+        z_vals = self.z_cache[img_idx].reshape(-1, 1).split(80000) if img_idx in self.z_cache else [None] * len(rays_o)
 
         out_rgb_fine = []
         out_rgb_orig = []
         out_normal_fine = []
+        out_z_vals = []
+        out_depth = []
         # out_label_fine = []
         # out_depth_fine = []
         # out_beta = []
 
-        for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
-            near = torch.zeros_like(rays_o_batch[:, 0])
-            far = torch.ones_like(rays_o_batch[:, 0]) * 0.5
-            near = near.unsqueeze(-1)
-            far = far.unsqueeze(-1)
+        for rays_o_batch, rays_d_batch, z_vals_batch in zip(rays_o, rays_d, z_vals):
+
+            # near = torch.zeros_like(rays_o_batch[:, 0])
+            # far = torch.ones_like(rays_o_batch[:, 0]) * 0.5
+            # near = near.unsqueeze(-1)
+            # far = far.unsqueeze(-1)
+            if True:
+                near = torch.zeros_like(rays_o_batch[:, 0])
+                far = torch.ones_like(rays_o_batch[:, 0]) * 0.5
+                near = near.unsqueeze(-1)
+                far = far.unsqueeze(-1)
+            else:
+                near = z_vals_batch - 0.05
+                far = z_vals_batch + 0.05
 
             background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
 
@@ -1017,7 +1239,18 @@ class Ground(nn.Module):
                                               far,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                               background_rgb=background_rgb,
-                                              camera_encod=camera_encod)
+                                              camera_encod=camera_encod,
+                                              perturb_overwrite=-1,
+                                              n_importance=16,
+                                                n_samples=128,
+                                                up_sample_steps=2,
+                                                is_test=True)
+            rays_real = (rays_d_batch * render_out['z_vals'].unsqueeze(-1)).detach().cpu() @ self.scale_mat[:3, :3].T
+            depth = rays_real.norm(dim=-1).numpy()
+            out_depth.append(depth)
+
+
+
 
             out_rgb_orig.append(render_out['orig_color'].detach().cpu().numpy())
 
@@ -1025,6 +1258,8 @@ class Ground(nn.Module):
 
             if feasible('color_fine'):
                 out_rgb_fine.append(render_out['color_fine'].detach().cpu().numpy())
+                out_z_vals.append(render_out['z_vals'].detach().cpu().numpy())
+                # out_z_vals.append(visualize_depth((render_out['z_vals'].detach().cpu().reshape(H, W).numpy() * 2).clip(0, 1) ))
             if feasible('gradients') and feasible('weights'):
                 n_samples = self.renderer.n_samples + self.renderer.n_importance
                 normals = render_out['gradients'] * render_out['weights'][:, :n_samples, None]
@@ -1045,6 +1280,16 @@ class Ground(nn.Module):
             img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3, -1]) * 255).clip(0, 255).astype(np.uint8)
         if len(out_rgb_orig) > 0:
             img_orig = (np.concatenate(out_rgb_orig, axis=0).reshape([H, W, 3, -1]) * 255).clip(0, 255).astype(np.uint8)
+        rendered_z_vals = np.concatenate(out_z_vals, axis=0).reshape([H, W])
+        rendered_depth = np.concatenate(out_depth, axis=0).reshape([H, W])
+        valid_depth_mask = rendered_depth < FAR_DEPTH
+        rendered_depth = (rendered_depth - rendered_depth.min()) / (rendered_depth.max() - rendered_depth.min())
+        img_depth = (visualize_depth(rendered_depth.clip(0, 1)).reshape([H, W, 3, -1]) * 255).astype(np.uint8)
+        cached_z_vals = self.z_cache[image_infos['img_idx'].flatten()[0].item()].cpu().numpy() if image_infos['img_idx'].flatten()[0].item() in self.z_cache else rendered_z_vals
+        avg_error = (cached_z_vals > 0).astype(float) * np.abs(cached_z_vals - rendered_z_vals)
+        avg_error = avg_error.sum() / (cached_z_vals > 0).sum()
+        print('Avg error: ', avg_error)
+        img_z_vals = (visualize_depth((rendered_z_vals * 2).clip(0, 1)).reshape([H, W, 3, -1]) * 255).astype(np.uint8)
         # label_img = None
         # if len(out_label_fine) > 0:
         #     label_img = np.concatenate(out_label_fine, axis=0)
@@ -1058,27 +1303,17 @@ class Ground(nn.Module):
         after_affine = image_infos['after_affine'].cpu().numpy() * 255 if 'after_affine' in image_infos else np.zeros_like(gt_img)
         if 'rsg' in image_infos:
             rsg = image_infos['rsg'].cpu().numpy() * 255
-        # elif 'uncertainty' in image_infos:
-            # rsg = image_infos['uncertainty'].cpu().numpy() * 255
+        elif 'uncertainty' in image_infos:
+            rsg = image_infos['uncertainty'].cpu().numpy() * 255
         else:
             rsg = np.zeros_like(gt_img)
 
         if 'depth_normal' in image_infos:
             depth_normal = image_infos['depth_normal'].permute(1, 2, 0).numpy()
-        # elif 'opacity' in image_infos:
-        #     depth_normal = image_infos['opacity'].cpu().numpy() * 255
+        elif 'opacity' in image_infos:
+            depth_normal = image_infos['opacity'].cpu().numpy() * 255
         else:
             depth_normal = np.zeros_like(gt_img)
-            
-        if 'uncertainty' in image_infos:
-            uncertainty = image_infos['uncertainty'].cpu().numpy() * 255
-        else:
-            uncertainty = np.zeros_like(gt_img)
-            
-        if 'opacity' in image_infos:
-            opacity = image_infos['opacity'].cpu().numpy() * 255
-        else:
-            opacity = np.zeros_like(gt_img)
 
         normal = image_infos['normal'].permute(1, 2, 0).numpy() if 'normal' in image_infos else np.zeros_like(gt_img)
         
@@ -1088,13 +1323,19 @@ class Ground(nn.Module):
             if len(out_rgb_fine) > 0:
                 rgb_diff = np.abs(after_affine - gt_img)
                 # rgb_diff[mask == 0] = np.array([255, 0, 0])
-                right_col = np.concatenate([depth_blend,
+                right_col = np.concatenate([img_depth[..., i],
                                             gt_img, rgb_diff])
                 left_col = np.concatenate([depth_gt,
                                            before_affine, 
                                            after_affine])
                 right_right_col = np.concatenate([rsg, depth_normal, normal])
-                new_col = np.concatenate([img_fine[..., i], uncertainty, opacity])
+
+
+                import copy
+                clip = copy.deepcopy(img_fine[..., i]) * valid_depth_mask[..., None].astype(float)
+                # clip[:int(3 / 5 * H)] = 0
+                
+                new_col = np.concatenate([img_fine[..., i], img_orig[..., i], clip])
                 # label_diff = np.abs(label_img[..., i] - label_img_gt)
                 # # label_diff[~road_mask] = 0
                 # label_cat = np.concatenate([label_img[..., i], label_img_gt, label_diff])
@@ -1302,6 +1543,10 @@ class Ground(nn.Module):
             return 1.0
         else:
             return np.min([1.0, self.iter_step / self.anneal_end])
+    def clear_z_cache(self):
+        self.z_cache = {}
+    def clear_rgb_cache(self):
+        self.rgb_cache = {}
     def forward(self, image_infos, camera_infos, force_render_full=False) -> torch.Tensor:
         """
         image_infos: {
@@ -1331,27 +1576,44 @@ class Ground(nn.Module):
         
         return rgb
         """
+
+        if self.iter_step % 10000 == 0:
+            self.clear_rgb_cache()
+
+        img_idx = image_infos['img_idx'].flatten()[0].item()
+        # if img_idx in self.rgb_cache:
+        #     render_out = {}
+        #     render_out['rgb'] = self.rgb_cache[img_idx]['rgb']
+        #     render_out['opacity'] = self.rgb_cache[img_idx]['opacity']
+        #     render_out['z_vals_full'] = self.rgb_cache[img_idx]['z_vals_full']
+        #     return render_out
         # 训练模式下会多输出计算图上的self.batch_size个变量
         is_train = image_infos['is_train']
         H, W, _ = image_infos['viewdirs'].shape
 
+
+        local_road_masks = image_infos['road_masks'].clone()
+        # local_road_masks[:int(3 / 5 * H), :] = 0
+
         # H, W是原始图片大小
         if 'road_masks' not in image_infos:
-            image_infos['road_masks'] = torch.ones([H, W], device=image_infos['viewdirs'].device)
-            image_infos['road_masks'][:int(2 / 5 * H), :] = 0    # 为了节约时间，假设前2/5不能是路面
-        if image_infos['road_masks'].sum() == 0:
-            image_infos['road_masks'][0][0] = 1
+            local_road_masks = torch.ones([H, W], device=image_infos['viewdirs'].device)
+            local_road_masks[:int(2 / 5 * H), :] = 0    # 为了节约时间，假设前2/5不能是路面
+        if local_road_masks.sum() == 0:
+            local_road_masks[0][0] = 1
+        
+
 
         # 测试mask
         test_mask = torch.ones([H, W], device=image_infos['viewdirs'].device)
-        test_mask[:int(2 / 5 * H), :] = 0    # 为了节约时间，假设前2/5不能是路面
-        # test_mask = image_infos['road_masks'] if is_train else torch.ones([H, W], device=image_infos['viewdirs'].device)
         # test_mask[:int(2 / 5 * H), :] = 0    # 为了节约时间，假设前2/5不能是路面
-        # test_mask = image_infos['road_masks']
+        test_mask =  torch.ones([H, W], device=image_infos['viewdirs'].device)
+        test_mask[:int(2 / 5 * H), :] = 0    # 为了节约时间，假设前2/5不能是路面
+        # test_mask = local_road_masks
         
         # 训练mask是从路面mask中随机采样self.batch_size个点
         if is_train:
-            train_mask = image_infos['road_masks']
+            train_mask = local_road_masks
             grid = torch.cat([tesr.unsqueeze(-1) for tesr in torch.meshgrid(torch.arange(H, device=train_mask.device), torch.arange(W, device=train_mask.device))], dim=-1)
             grid = grid[train_mask == 1]
             grid = grid[torch.randint(0, grid.shape[0], [self.batch_size])]
@@ -1377,12 +1639,14 @@ class Ground(nn.Module):
         
         
         # if is_train:
-        #     road_mask = image_infos['road_masks'][mask == 1]
+        #     road_mask = local_road_masks[mask == 1]
         #     gt_rgb = image_infos['pixels'][mask == 1]
         #     rays_d_train = rays_d[]
         #     # rand_indices = torch.randint(0, rays_d.shape[0], [self.batch_size])
 
         # iter_step传到下游
+        if img_idx in self.z_cache:
+            z_vals = self.z_cache[img_idx]
         self.sdf_network.iter_step = self.iter_step
         self.renderer.iter_step = self.iter_step
         self.sdf_network.requires_grad_(True)
@@ -1394,21 +1658,42 @@ class Ground(nn.Module):
             rays_d_train = rays_d[train_mask == 1]
             rays_o_train = rays_o[train_mask == 1]
             camera_encod_train = camera_encod[train_mask == 1]
-            near_train = torch.zeros_like(rays_d_train[:, 0], device=self.device)
-            far_train = torch.ones_like(rays_d_train[:, 0], device=self.device) * 0.5
-            near_train = near_train.unsqueeze(-1)
-            far_train = far_train.unsqueeze(-1)
+            z_vals_train = z_vals[train_mask == 1] if img_idx in self.z_cache else None
+            if img_idx not in self.z_cache: # not using caches z_vals for train
+                near_train = torch.zeros_like(rays_d_train[:, 0], device=self.device)
+                far_train = torch.ones_like(rays_d_train[:, 0], device=self.device) * 0.5
+                near_train = near_train.unsqueeze(-1)
+                far_train = far_train.unsqueeze(-1)
+            else:
+                near_train = z_vals_train.unsqueeze(-1) - 0.05
+                far_train = z_vals_train.unsqueeze(-1) + 0.05
             
             render_out_train = self.renderer.render(rays_o_train.reshape(-1, 3), rays_d_train.reshape(-1, 3), near_train.reshape(-1, 1), far_train.reshape(-1, 1),
                                         background_rgb=None,
                                         cos_anneal_ratio=self.get_cos_anneal_ratio(),
-                                        camera_encod=camera_encod_train.reshape(-1) if camera_encod is not None else None)
+                                        camera_encod=camera_encod_train.reshape(-1) if camera_encod is not None else None,
+                                        n_importance=16,
+                                                n_samples=128,
+                                                up_sample_steps=2,
+                                                )
+            rays_real = (rays_d_train.reshape(-1, 3) * render_out_train['z_vals'].unsqueeze(-1)).detach() @ torch.from_numpy(self.scale_mat[:3, :3]).T.to(self.device)
+            depth = rays_real.norm(dim=-1)
+            valid_mask = depth < FAR_DEPTH
+            render_out_train['depth'] = depth
+            render_out_train['valid_mask'] = valid_mask
             render_out.update(render_out_train)
-        if not self.render_full and not force_render_full:
-            if is_train:
+        if is_train:
                 # 真值用来计算loss
                 render_out['gt_rgb'] = image_infos['pixels'][train_mask == 1]
+        if not self.render_full and not force_render_full:
             return render_out
+
+        if img_idx in self.rgb_cache:
+            render_out['rgb'] = self.rgb_cache[img_idx]['rgb']
+            render_out['opacity'] = self.rgb_cache[img_idx]['opacity']
+            render_out['z_vals_full'] = self.rgb_cache[img_idx]['z_vals_full']
+            return render_out
+            
         # render full
         # save memory render
         rays_o_test = rays_o[test_mask == 1]
@@ -1417,34 +1702,49 @@ class Ground(nn.Module):
             camera_encod_test = camera_encod[test_mask == 1]
         else:
             camera_encod_test = None
-        rays_o_test = rays_o_test.reshape(-1, 3).split(self.batch_size)
-        rays_d_test = rays_d_test.reshape(-1, 3).split(self.batch_size)
+        rays_o_test = rays_o_test.reshape(-1, 3).split(80000)
+        rays_d_test = rays_d_test.reshape(-1, 3).split(80000)
+        if img_idx in self.z_cache:
+            z_vals_test = self.z_cache[img_idx][test_mask == 1].split(80000)
         out_rgb = []
         out_opacity = []
+        out_z_vals = []
         # for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
         for i in range(len(rays_o_test)):
             rays_o_batch = rays_o_test[i]
             rays_d_batch = rays_d_test[i]
+            z_vals_batch = z_vals_test[i] if img_idx in self.z_cache else None
             if camera_encod_test is not None:
                 camera_encod_batch = camera_encod_test[i].squeeze()
             else:
                 camera_encod_batch = None
-            near_batch = torch.zeros_like(rays_o_batch[:, 0])
-            far_batch = torch.ones_like(rays_o_batch[:, 0]) * 0.5
-            near_batch = near_batch.unsqueeze(-1)
-            far_batch = far_batch.unsqueeze(-1)
+
+            # if True:
+            if img_idx not in self.z_cache:
+                near_batch = torch.zeros_like(rays_o_batch[:, 0])
+                far_batch = torch.ones_like(rays_o_batch[:, 0]) * 0.5
+                near_batch = near_batch.unsqueeze(-1)
+                far_batch = far_batch.unsqueeze(-1)
+            else:
+                near_batch = z_vals_batch.unsqueeze(-1) - 0.05
+                far_batch = z_vals_batch.unsqueeze(-1) + 0.05
 
             background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
 
 
-            if is_train:
+            if is_train and img_idx in self.z_cache:
                 render_out_test = self.renderer.render(rays_o_batch,
                                                 rays_d_batch,
                                                 near_batch,
                                                 far_batch,
                                                 cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                                 background_rgb=background_rgb,
-                                                camera_encod=camera_encod_batch)
+                                                camera_encod=camera_encod_batch,
+                                                n_importance=4,
+                                                n_samples=4,
+                                                up_sample_steps=2,
+                                                perturb_overwrite=-1,
+                                                is_test=True)
             else:
                 render_out_test = self.renderer.render(rays_o_batch,
                                                 rays_d_batch,
@@ -1455,27 +1755,47 @@ class Ground(nn.Module):
                                                 camera_encod=camera_encod_batch,
                                                 n_importance=16,
                                                 n_samples=128,
-                                                up_sample_steps=2,)
+                                                up_sample_steps=2,
+                                                perturb_overwrite=-1,
+                                                is_test=True)
             out_rgb.append(render_out_test['color_fine'].detach())
             out_opacity.append(render_out_test['weight_sum'].detach())
-            
+            out_z_vals.append(render_out_test['z_vals'].detach())
             del render_out_test
         render_out['color_fine_test'] = torch.cat(out_rgb, dim=0)
         render_out['weight_sum_test'] = torch.cat(out_opacity, dim=0)
+        new_z_vals = torch.cat(out_z_vals, dim=0)
         rgb_full = torch.zeros((H, W, 3), device=c2w.device)
         opacity_full = torch.zeros((H, W), device=c2w.device)
+        z_vals_full = torch.zeros((H, W), device=c2w.device)
         opacity_full[test_mask == 1] = render_out['weight_sum_test'].squeeze()
+        z_vals_full[test_mask == 1] = new_z_vals.squeeze()
+
+
+        self.z_cache[img_idx] = z_vals_full
+
         rgb_full[test_mask == 1] = render_out['color_fine_test']
         # omnire需要的输出：rgb_full, opacity_full
         # TODO: 增加训练梯度回传
-        if is_train:
-            rgb_full[train_mask == 1] = render_out['color_fine']
+        # if is_train:
+        #     rgb_full[train_mask == 1] = render_out['color_fine']
+        #     z_vals_full[train_mask == 1] = render_out['z_vals']
         render_out['rgb'] = rgb_full
         
         render_out['opacity'] = opacity_full.unsqueeze(-1)
+        render_out['z_vals_full'] = z_vals_full.unsqueeze(-1)
 
-        if is_train:
-            render_out['gt_rgb'] = image_infos['pixels'][train_mask == 1]    #neus依然只训练路面部分
+
+
+
+        if img_idx not in self.rgb_cache:
+            self.rgb_cache[img_idx] = DiskDict("img_cache", idx=img_idx, save_format="png")
+            self.rgb_cache[img_idx]['rgb'] = rgb_full.detach()
+            self.rgb_cache[img_idx]['opacity'] = opacity_full.unsqueeze(-1).detach()
+            self.rgb_cache[img_idx]['z_vals_full'] = z_vals_full.unsqueeze(-1).detach()
+
+        # if is_train:
+        #     render_out['gt_rgb'] = image_infos['pixels'][train_mask == 1]    #neus依然只训练路面部分
         
         
         # # 把neus非路面的颜色变成黑色
@@ -1513,8 +1833,12 @@ class Ground(nn.Module):
         
         return rgb
         """
-        if 'gt_rgb' not in render_out:
+        img_idx = image_infos['img_idx'].flatten()[0].item()
+        # if img_idx in self.rgb_cache:
+        if 'gt_rgb' not in render_out or 'color_fine' not in render_out:
+            assert img_idx in self.rgb_cache
             return {}
+        
         true_rgb = render_out['gt_rgb']
         B, _ = true_rgb.shape
         
@@ -1531,7 +1855,7 @@ class Ground(nn.Module):
         
         if "l1" in self.losses:
             color_fine = render_out['color_fine']
-            color_error = (color_fine - true_rgb)
+            color_error = (color_fine - true_rgb) * render_out['valid_mask'].reshape(color_fine.shape[0], color_fine.shape[1], 1)
             color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='mean')
 
             losses['neus/l1'] = color_fine_loss * self.losses.l1.w

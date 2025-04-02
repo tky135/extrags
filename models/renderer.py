@@ -254,8 +254,11 @@ class NeuSRenderer:
         # TODO: 不要算两次
         # delta = sdf_network(pts, delta=False)[:, 0]
         # delta_loss = torch.mean(delta ** 2)
-
-        gradients = sdf_network.gradient(pts).squeeze()
+        if False:
+            gradients = torch.zeros_like(pts)
+            gradients[:, 2] = 1.0
+        else:
+            gradients = sdf_network.gradient(pts).squeeze()
         # sampled_color, sampled_delta_color, sampled_beta = color_network(pts, gradients, dirs, feature_vector, camera_encod, is_test=is_test)
         color_output_dict = color_network(feature_vector, pts, gradients, dirs, camera_encod)
         sampled_color, sampled_delta_color, sampled_beta, sampled_orig_color = color_output_dict["rgb"], color_output_dict["delta"], color_output_dict["beta"], color_output_dict["rgb_orig"]
@@ -333,7 +336,7 @@ class NeuSRenderer:
             # 'beta': beta
         }
 
-    def render(self, rays_o, rays_d, near, far, perturb_overwrite=-1, background_rgb=None, cos_anneal_ratio=0.0, camera_encod=None, is_test=False, **kwargs):
+    def render(self, rays_o, rays_d, near, far, perturb_overwrite=None, background_rgb=None, cos_anneal_ratio=0.0, camera_encod=None, is_test=False, **kwargs):
         # overwrite configuration when testing
         n_importance_ = self.n_importance if "n_importance" not in kwargs else kwargs["n_importance"]
         n_samples_ = self.n_samples if "n_samples" not in kwargs else kwargs["n_samples"]
@@ -347,7 +350,7 @@ class NeuSRenderer:
         n_samples = n_samples_
         perturb = self.perturb
 
-        if perturb_overwrite >= 0:
+        if perturb_overwrite is not None:
             perturb = perturb_overwrite
         if perturb > 0:
             t_rand = (torch.rand([batch_size, 1], device=rays_o.device) - 0.5)
@@ -375,6 +378,9 @@ class NeuSRenderer:
                 pts = rays_o[:, None, :] + rays_d[:, None, :] * new_z_vals[..., :, None]
                 sdf = self.sdf_network.sdf(pts.reshape(-1, 3)).reshape(batch_size, n_importance_ // up_sample_steps_)
 
+                if up_sample_steps_ == 1:
+                    final_z_vals = new_z_vals.mean(dim=-1)
+
                 for i in range(1, up_sample_steps_):
                     new_z_vals = self.up_sample(rays_o,
                                                 rays_d,
@@ -382,6 +388,8 @@ class NeuSRenderer:
                                                 sdf,
                                                 n_importance_ // up_sample_steps_,
                                                 64 * 2**i) # 越来越小的variance
+                    if i == up_sample_steps_ - 1:
+                        final_z_vals = new_z_vals.mean(dim=-1)
                     z_vals, sdf = self.cat_z_vals(rays_o,
                                                   rays_d,
                                                   z_vals,
@@ -427,6 +435,7 @@ class NeuSRenderer:
             'weights': weights,
             'gradient_error': ret_fine['gradient_error'],
             'inside_sphere': ret_fine['inside_sphere'], 
+            'z_vals': final_z_vals,
             # 'label': labels,
             # 'delta_loss': ret_fine['delta_loss'],
             # 'depth': ret_fine['depth'], 
